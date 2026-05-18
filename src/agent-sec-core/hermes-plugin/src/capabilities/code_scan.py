@@ -56,11 +56,17 @@ class CodeScanCapability(AgentSecCoreCapability):
 
         # 4. Parse result (fail-open on errors)
         if result.exit_code != 0:
+            logger.warning(
+                f"[agent-sec-core] {self.id} agent-sec-cli exit_code={result.exit_code}, fail-open tool={tool_name} code={code[:120]}"
+            )
             return None
 
         try:
             scan = json.loads(result.stdout)
         except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                f"[agent-sec-core] {self.id} agent-sec-cli returned invalid JSON, fail-open tool={tool_name} code={code[:120]}"
+            )
             return None
 
         verdict = scan.get("verdict", "pass")
@@ -68,19 +74,39 @@ class CodeScanCapability(AgentSecCoreCapability):
         # warn and deny are separate branches (coding convention), same behavior
         if verdict == "deny":
             msg = self._format_message(scan)
-            logger.warning(f"DENY tool={tool_name} code={code[:120]} | {msg}")
+            logger.warning(
+                f"[agent-sec-core] {self.id} DENY tool={tool_name} code={code[:120]} | {msg}"
+            )
             if self._enable_block:
                 return {"action": "block", "message": msg}
             return None
 
         if verdict == "warn":
             msg = self._format_message(scan)
-            logger.warning(f"WARN tool={tool_name} code={code[:120]} | {msg}")
+            logger.warning(
+                f"[agent-sec-core] {self.id} WARN tool={tool_name} code={code[:120]} | {msg}"
+            )
             if self._enable_block:
                 return {"action": "block", "message": msg}
             return None
 
-        logger.info(f"PASS tool={tool_name} code={code[:120]}")
+        if verdict == "pass":
+            logger.info(
+                f"[agent-sec-core] {self.id} PASS tool={tool_name} code={code[:120]}"
+            )
+            return None
+
+        # verdict == "error" — scanner itself failed, fail-open
+        if verdict == "error":
+            logger.warning(
+                f"[agent-sec-core] {self.id} agent-sec-cli returned verdict=error, fail-open tool={tool_name} code={code[:120]}"
+            )
+            return None
+
+        # unknown verdict — defensive fallback, fail-open
+        logger.warning(
+            f"[agent-sec-core] {self.id} UNKNOWN verdict={verdict} tool={tool_name} code={code[:120]}"
+        )
         return None
 
     def _format_message(self, scan: dict) -> str:
@@ -88,7 +114,11 @@ class CodeScanCapability(AgentSecCoreCapability):
         summary = scan.get("summary", "")
         findings = scan.get("findings", [])
         lines = [
-            f"[agent-sec] {summary}" if summary else "[agent-sec] Code scan blocked"
+            (
+                f"[agent-sec-core] {summary}"
+                if summary
+                else "[agent-sec-core] Code scan blocked"
+            )
         ]
         for f in findings:
             rule_id = f.get("rule_id", "?")

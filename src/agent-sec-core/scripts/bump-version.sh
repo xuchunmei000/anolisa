@@ -17,7 +17,8 @@
 #   5. openclaw-plugin/package.json          ("version" field)
 #   6. openclaw-plugin/openclaw.plugin.json  ("version" field)
 #   7. cosh-extension/cosh-extension.json    ("version" field)
-#   8. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
+#   8. hermes-plugin/src/plugin.yaml        (version field)
+#   9. Lock files: Cargo.lock, uv.lock, package-lock.json (auto-regenerated)
 #
 # Manual update required (not automated):
 #   - agent-sec-core.spec.in  (%changelog entry)

@@ -27,7 +27,7 @@ def load_config(plugin_dir: Path) -> dict[str, Any]:
         with open(config_path, "rb") as f:
             return tomllib.load(f)
     except (FileNotFoundError, tomllib.TOMLDecodeError, OSError) as e:
-        logger.warning(f"Failed to load config: {e}")
+        logger.warning(f"[agent-sec-core] Failed to load config: {e}")
         return {}
 
 
@@ -43,11 +43,13 @@ def safe_hook_wrapper(callback, capability_id: str):
         try:
             result = callback(*args, **kwargs)
         except Exception as e:
-            logger.error(f"[{capability_id}] hook error: {e}")
+            logger.error(f"[agent-sec-core] {capability_id} hook error: {e}")
             return None
         elapsed = time.monotonic() - start
         if elapsed > _SLOW_HOOK_THRESHOLD:
-            logger.warning(f"[{capability_id}] slow hook: {elapsed:.2f}s")
+            logger.warning(
+                f"[agent-sec-core] {capability_id} slow hook: {elapsed:.2f}s"
+            )
         return result
 
     return wrapper
@@ -59,7 +61,7 @@ def register_capabilities(
     """Register all enabled capabilities with the Hermes plugin context."""
     if "capabilities" not in config:
         logger.error(
-            "config missing [capabilities] section, no capabilities registered"
+            f"[agent-sec-core] config missing [capabilities] section, no capabilities registered"
         )
         return
     caps_config = config["capabilities"]
@@ -67,18 +69,20 @@ def register_capabilities(
     for cap in capabilities:
         if cap.id not in caps_config:
             logger.error(
-                f"[{cap.id}] config section [capabilities.{cap.id}] not found, skipping"
+                f"[agent-sec-core] {cap.id} config section [capabilities.{cap.id}] not found, skipping"
             )
             continue
         cap_config = caps_config[cap.id]
         if "enabled" not in cap_config:
-            logger.error(f"[{cap.id}] config missing required key 'enabled', skipping")
+            logger.error(
+                f"[agent-sec-core] {cap.id} config missing required key 'enabled', skipping"
+            )
             continue
         if not cap_config["enabled"]:
-            logger.info(f"[{cap.id}] disabled by config, skipping")
+            logger.info(f"[agent-sec-core] {cap.id} disabled by config, skipping")
             continue
         try:
             cap.register(ctx, cap_config)
-            logger.info(f"[{cap.id}] registered successfully")
+            logger.info(f"[agent-sec-core] {cap.id} registered successfully")
         except Exception as e:
-            logger.error(f"[{cap.id}] registration failed: {e}")
+            logger.error(f"[agent-sec-core] {cap.id} registration failed: {e}")

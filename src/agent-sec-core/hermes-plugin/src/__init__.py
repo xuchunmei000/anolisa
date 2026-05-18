@@ -20,4 +20,4 @@ def register(ctx):
     plugin_dir = Path(__file__).parent
     config = load_config(plugin_dir)
     register_capabilities(ctx, ALL_CAPABILITIES, config)
-    logger.info("agent-sec-core plugin loaded")
+    logger.info("[agent-sec-core] plugin loaded")
