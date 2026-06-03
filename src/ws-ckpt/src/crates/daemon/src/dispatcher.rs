@@ -185,7 +185,7 @@ async fn handle_status(
         }]
     } else {
         // Global mode: return all workspaces
-        state.get_all_workspace_info()
+        state.get_all_workspace_info().await
     };
 
     // Try to get filesystem usage; fallback to zeros on error (e.g., macOS)
@@ -305,6 +305,7 @@ fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
 async fn handle_health_advisory(state: &Arc<DaemonState>) -> Response {
     let over_limit_workspace_count: u32 = state
         .get_all_workspace_info()
+        .await
         .iter()
         .filter(|w| w.snapshot_count > ADVISORY_SNAPSHOT_LIMIT)
         .count() as u32;

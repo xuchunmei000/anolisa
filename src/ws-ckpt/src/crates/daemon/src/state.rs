@@ -216,16 +216,19 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Collect current all registered workspace entries
-    /// (for serialization to state.json)
+    /// Collect registered workspace entries for state.json. No RwLock taken so
+    /// a write-locked ws is not silently dropped.
     fn collect_workspace_entries(&self) -> Vec<WorkspaceEntry> {
-        self.workspaces
+        self.path_to_wsid
             .iter()
             .filter_map(|entry| {
-                let ws = entry.value().try_read().ok()?;
+                let ws_id = entry.value().clone();
+                if !self.workspaces.contains_key(&ws_id) {
+                    return None;
+                }
                 Some(WorkspaceEntry {
-                    ws_id: ws.ws_id.clone(),
-                    workspace_path: ws.path.clone(),
+                    ws_id,
+                    workspace_path: entry.key().clone(),
                     registered_at: Utc::now(),
                     origin_backend: self.backend.backend_type(),
                 })
@@ -302,21 +305,15 @@ impl DaemonState {
         self.workspaces.insert(ws_id, state);
     }
 
-    pub fn unregister_workspace(&self, ws_id: &str) {
+    pub fn unregister_workspace(&self, ws_id: &str, path: &Path) {
         // Stop watcher if present
         if let Ok(mut watchers) = self.watchers.lock() {
             if let Some(w) = watchers.remove(ws_id) {
                 w.stop();
             }
         }
-        if let Some((_, ws_state)) = self.workspaces.remove(ws_id) {
-            // We need the path to remove from path_to_wsid.
-            // Since we can't async here, use try_read or blocking_read.
-            // The RwLock should be uncontested at this point.
-            if let Ok(state) = ws_state.try_read() {
-                self.path_to_wsid.remove(&state.path);
-            }
-        }
+        self.workspaces.remove(ws_id);
+        self.path_to_wsid.remove(path);
     }
 
     /// Register a file watcher for a workspace.
@@ -492,28 +489,20 @@ impl DaemonState {
         }
     }
 
-    /// Collect summary information about all registered workspaces.
-    pub fn get_all_workspace_info(&self) -> Vec<WorkspaceInfo> {
-        self.workspaces
-            .iter()
-            .map(|entry| {
-                let ws = entry.value();
-                // Use try_read to avoid blocking; the lock should be uncontested.
-                if let Ok(state) = ws.try_read() {
-                    WorkspaceInfo {
-                        ws_id: state.ws_id.clone(),
-                        path: state.path.to_string_lossy().to_string(),
-                        snapshot_count: state.index.snapshots.len() as u32,
-                    }
-                } else {
-                    WorkspaceInfo {
-                        ws_id: entry.key().clone(),
-                        path: "<locked>".to_string(),
-                        snapshot_count: 0,
-                    }
-                }
-            })
-            .collect()
+    /// Collect summary information about all registered workspaces. Awaits the
+    /// read lock so the result reflects real path/snapshot_count even when a
+    /// ws is held under a write lock.
+    pub async fn get_all_workspace_info(&self) -> Vec<WorkspaceInfo> {
+        let mut out = Vec::new();
+        for arc in self.all_workspaces() {
+            let state = arc.read().await;
+            out.push(WorkspaceInfo {
+                ws_id: state.ws_id.clone(),
+                path: state.path.to_string_lossy().to_string(),
+                snapshot_count: state.index.snapshots.len() as u32,
+            });
+        }
+        out
     }
 }
 
@@ -675,7 +664,7 @@ mod tests {
         assert!(state.get_by_path(&path).is_some());
 
         // Unregister
-        state.unregister_workspace("ws-rm");
+        state.unregister_workspace("ws-rm", &path);
 
         // Verify both mappings removed
         assert!(state.get_by_wsid("ws-rm").is_none());
@@ -805,5 +794,44 @@ mod tests {
         // but we can verify the OnceCell is properly initialized.
         let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
         assert!(state.bootstrapped.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_workspace_entries_does_not_drop_write_locked_ws() {
+        use tokio::sync::oneshot;
+
+        let state = DaemonState::new(test_config(), test_backend(), test_state_dir());
+        let path_a = PathBuf::from("/ws-locked");
+        let path_b = PathBuf::from("/ws-free");
+        state.register_workspace(
+            "ws-a".to_string(),
+            path_a.clone(),
+            SnapshotIndex::new(path_a),
+        );
+        state.register_workspace(
+            "ws-b".to_string(),
+            path_b.clone(),
+            SnapshotIndex::new(path_b),
+        );
+
+        let ws_a = state.get_by_wsid("ws-a").unwrap();
+        let (acquired_tx, acquired_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let holder = tokio::spawn(async move {
+            let _guard = ws_a.write().await;
+            let _ = acquired_tx.send(());
+            let _ = release_rx.await;
+        });
+        acquired_rx.await.unwrap();
+
+        let entries = state.collect_workspace_entries();
+        let ids: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.ws_id.as_str()).collect();
+        assert_eq!(entries.len(), 2);
+        assert!(ids.contains("ws-a"));
+        assert!(ids.contains("ws-b"));
+
+        let _ = release_tx.send(());
+        holder.await.unwrap();
     }
 }

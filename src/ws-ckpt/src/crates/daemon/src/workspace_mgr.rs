@@ -410,8 +410,7 @@ pub async fn delete_snapshot(
         .with_context(|| format!("Failed to create index dir: {:?}", snap_dir))?;
     index_store::save(&snap_dir, &ws.index).await?;
 
-    // 5a. Release write lock before save_manifest (try_read inside
-    //     collect_workspace_entries would fail while write lock is held)
+    // 5a. Release write lock before save_manifest
     drop(ws);
 
     // 5b. Save manifest
@@ -455,7 +454,7 @@ pub async fn recover_workspace(
         .await?;
 
     // 4. unregister workspace from state
-    state.unregister_workspace(&ws_id);
+    state.unregister_workspace(&ws_id, std::path::Path::new(&original_path));
 
     // 4a. Save manifest
     if let Err(e) = state.save_manifest().await {
