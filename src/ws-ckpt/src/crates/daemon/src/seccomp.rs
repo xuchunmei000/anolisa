@@ -14,7 +14,33 @@ use seccompiler::{
     SeccompFilter, SeccompRule, TargetArch,
 };
 
+/// Match the build target_arch to seccompiler's TargetArch so the BPF
+/// audit_arch check passes at runtime. Returns Err on unsupported arches
+/// (e.g. loongarch64) so the daemon refuses to install a no-op filter.
+fn target_arch() -> anyhow::Result<TargetArch> {
+    #[cfg(target_arch = "x86_64")]
+    return Ok(TargetArch::x86_64);
+    #[cfg(target_arch = "aarch64")]
+    return Ok(TargetArch::aarch64);
+    #[cfg(target_arch = "riscv64")]
+    return Ok(TargetArch::riscv64);
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    anyhow::bail!(
+        "seccomp filter not supported on target arch '{}'; refusing to install no-op filter",
+        std::env::consts::ARCH
+    );
+}
+
 /// Blocked syscalls — operations the daemon should never perform.
+///
+/// Excluded on purpose: new mount API (fsopen/fsmount/fsconfig/move_mount/
+/// open_tree/mount_setattr), io_uring, and landlock. mount(8) and various
+/// libraries probe these and only fall back on ENOSYS; returning EPERM would
+/// break the daemon's own mount path or future tokio io_uring opt-in.
 ///
 /// Categories:
 /// - Kernel/module manipulation
@@ -23,8 +49,8 @@ use seccompiler::{
 /// - Swap management
 /// - Accounting / profiling
 /// - Key management
-/// - Network-related (the daemon only uses Unix domain sockets)
-/// - Virtualization
+/// - Virtualization / namespaces
+/// - pidfd / cross-process memory (daemon never inspects other processes)
 fn blocked_syscalls() -> Vec<i64> {
     vec![
         // ── Kernel module loading ──
@@ -60,10 +86,14 @@ fn blocked_syscalls() -> Vec<i64> {
         libc::SYS_unshare,
         libc::SYS_setns,
         // ── Misc dangerous ──
-        libc::SYS_lookup_dcookie,
         libc::SYS_bpf, // prevent loading arbitrary BPF programs
         libc::SYS_userfaultfd,
         libc::SYS_move_pages,
+        // ── pidfd / cross-process memory (5.x) ──
+        libc::SYS_pidfd_open,
+        libc::SYS_pidfd_send_signal,
+        libc::SYS_pidfd_getfd,
+        libc::SYS_process_madvise,
     ]
 }
 
@@ -92,7 +122,7 @@ pub fn apply_seccomp_filter() -> anyhow::Result<()> {
         rules,
         SeccompAction::Allow,                     // default: allow everything
         SeccompAction::Errno(libc::EPERM as u32), // blocked: return EPERM
-        TargetArch::x86_64,
+        target_arch()?,
     )?;
 
     let bpf: BpfProgram = filter.try_into()?;
@@ -124,7 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_builds_successfully() {
+    fn filter_builds_for_target_arch() {
+        let arch = target_arch().expect("test host arch should be supported");
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
         for syscall in blocked_syscalls() {
             rules.insert(syscall, vec![unconditional_rule().unwrap()]);
@@ -133,7 +164,7 @@ mod tests {
             rules,
             SeccompAction::Allow,
             SeccompAction::Errno(libc::EPERM as u32),
-            TargetArch::x86_64,
+            arch,
         );
         assert!(filter.is_ok(), "seccomp filter should build without errors");
     }
