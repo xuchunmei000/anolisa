@@ -646,10 +646,57 @@ class TestWriterFireAndForget:
         writer = JsonlEventWriter(path=path)
 
         with pytest.raises(TypeError):
-            writer.write_or_raise({"bad": object()})
+            writer.write_or_raise({"path": Path("/tmp/x")})
 
         captured = capsys.readouterr()
         assert captured.err == ""
+
+    def test_write_invokes_on_error_for_io_failure(self, tmp_path: Path) -> None:
+        """When the underlying append fails (e.g. ENOSPC simulated via patched
+        ``_append_record``), the configured ``on_error`` callback is invoked
+        with the exception. See PR #651 review #1.
+        """
+        captured: list[Exception] = []
+
+        def _capture(exc: Exception) -> None:
+            captured.append(exc)
+
+        path = tmp_path / "events.jsonl"
+        writer = JsonlEventWriter(path=path, on_error=_capture)
+
+        boom = OSError("no space left on device")
+
+        def _raising(_record: object) -> None:
+            raise boom
+
+        writer._append_record = _raising  # type: ignore[assignment]
+        writer.write({"k": "v"})
+
+        assert captured == [boom]
+
+    def test_write_swallows_on_error_callback_failure(self, tmp_path: Path) -> None:
+        """A misbehaving ``on_error`` (e.g. raises) must not surface to the
+        caller — the writer's fire-and-forget contract is preserved.
+        """
+
+        def _bad_callback(_exc: Exception) -> None:
+            raise RuntimeError("on_error itself blew up")
+
+        path = tmp_path / "events.jsonl"
+        writer = JsonlEventWriter(path=path, on_error=_bad_callback)
+        writer._append_record = lambda _r: (_ for _ in ()).throw(  # type: ignore[assignment]
+            OSError("disk full")
+        )
+        writer.write({"k": "v"})  # must not raise
+
+    def test_write_without_on_error_remains_silent(self, tmp_path: Path) -> None:
+        """No callback configured (e.g. cli.jsonl handler) → silent drop, no recursion."""
+        path = tmp_path / "events.jsonl"
+        writer = JsonlEventWriter(path=path)
+        writer._append_record = lambda _r: (_ for _ in ()).throw(  # type: ignore[assignment]
+            OSError("disk full")
+        )
+        writer.write({"k": "v"})  # must not raise
 
 
 class TestWriterThreadSafety:

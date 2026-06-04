@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import uuid
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
@@ -75,6 +76,7 @@ _trace_context_override: ContextVar[_TraceContextOverride] = ContextVar(
 )
 
 _PROCESS_INVOCATION_ID: str = ""
+_INVOCATION_INIT_LOCK = threading.Lock()
 _invocation_id_override: ContextVar[str] = ContextVar(
     "invocation_id_override",
     default="",
@@ -165,14 +167,25 @@ def init_invocation_context() -> None:
     truncated to ``MAX_CORRELATION_ID_LENGTH`` so one malformed env value
     cannot inflate every log record. Empty or whitespace-only values fall
     through to a freshly generated UUID.
+
+    Thread-safe via double-checked locking: the fast-path read is unlocked
+    so the steady-state cost is one branch, but the actual generate-and-set
+    is serialised so concurrent first callers (e.g. ThreadPoolExecutor
+    workers in library-mode usage) cannot each generate a different UUID
+    and have one silently win.
     """
     global _PROCESS_INVOCATION_ID  # noqa: PLW0603
     if _PROCESS_INVOCATION_ID:
         return
-    env_value = _clean_string(
-        "invocation_id", os.environ.get("AGENT_SEC_INVOCATION_ID")
-    )
-    _PROCESS_INVOCATION_ID = env_value if env_value is not None else str(uuid.uuid4())
+    with _INVOCATION_INIT_LOCK:
+        if _PROCESS_INVOCATION_ID:
+            return
+        env_value = _clean_string(
+            "invocation_id", os.environ.get("AGENT_SEC_INVOCATION_ID")
+        )
+        _PROCESS_INVOCATION_ID = (
+            env_value if env_value is not None else str(uuid.uuid4())
+        )
 
 
 def clear_invocation_context_for_tests() -> None:

@@ -56,8 +56,16 @@ class TestInvoke(unittest.TestCase):
         self.assertEqual(call_kwargs["cwd"], "/tmp")
 
     def test_invoke_unknown_action_raises(self):
-        with self.assertRaises(ValueError):
-            invoke("totally_unknown_action")
+        with self.assertLogs("agent_sec_cli.security_middleware", level="ERROR") as cm:
+            with self.assertRaises(ValueError):
+                invoke("totally_unknown_action")
+
+        self.assertEqual(len(cm.records), 1)
+        record = cm.records[0]
+        self.assertEqual(record.message, "action routing failed")
+        self.assertEqual(record.data["action"], "totally_unknown_action")
+        self.assertGreaterEqual(record.data["duration_ms"], 0)
+        self.assertIsNotNone(record.exc_info)
 
     @patch("agent_sec_cli.security_middleware.router.get_backend")
     @patch("agent_sec_cli.security_middleware.lifecycle.post_action")

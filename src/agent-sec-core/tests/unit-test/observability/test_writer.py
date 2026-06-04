@@ -189,7 +189,7 @@ def test_observability_sqlite_write_or_raise_surfaces_skipped_insert(
     tmp_path: Path,
 ) -> None:
     class SkippingRepository:
-        def insert(self, record: object) -> bool:
+        def insert_or_raise(self, record: object) -> bool:
             return False
 
     record = validate_observability_record(_payload())
@@ -198,6 +198,144 @@ def test_observability_sqlite_write_or_raise_surfaces_skipped_insert(
 
     with pytest.raises(OSError, match="observability SQLite write was skipped"):
         writer.write_or_raise(record)
+
+
+def test_observability_repository_insert_returns_false_for_validation_error_without_dispose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = validate_observability_record(_payload())
+    writer = ObservabilitySqliteWriter(path=tmp_path / "observability.db")
+
+    dispose_calls: list[None] = []
+    original_dispose = writer._store.dispose
+
+    def _track_dispose() -> None:
+        dispose_calls.append(None)
+        original_dispose()
+
+    def _raise_validation(_record: object) -> dict[str, object]:
+        raise ValueError("bad observability record")
+
+    monkeypatch.setattr(writer._store, "dispose", _track_dispose)
+    monkeypatch.setattr(writer._repository, "_record_values", _raise_validation)
+
+    assert writer._repository.insert(record) is False
+    assert dispose_calls == []
+
+
+def test_observability_sqlite_write_or_raise_propagates_validation_errors_without_dispose(
+    tmp_path: Path,
+) -> None:
+    """A malformed record should surface as ValueError/TypeError WITHOUT
+    tearing down the engine pool — that would punish every subsequent
+    write with a full reconnect cost. See PR #651 review #5.
+    """
+
+    class ValidatingRepository:
+        def __init__(self) -> None:
+            self.inserts = 0
+
+        def insert_or_raise(self, record: object) -> bool:
+            self.inserts += 1
+            raise ValueError("malformed metadata.sessionId")
+
+    record = validate_observability_record(_payload())
+    writer = ObservabilitySqliteWriter(path=tmp_path / "observability.db")
+    repo = ValidatingRepository()
+    writer._repository = repo
+
+    dispose_calls: list[None] = []
+    original_dispose = writer._store.dispose
+
+    def _track_dispose() -> None:
+        dispose_calls.append(None)
+        original_dispose()
+
+    writer._store.dispose = _track_dispose  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="malformed metadata.sessionId"):
+        writer.write_or_raise(record)
+
+    # The validation error must propagate as ValueError (NOT wrapped as OSError)
+    # and the engine pool must NOT have been torn down.
+    assert dispose_calls == []
+    assert repo.inserts == 1
+
+
+def test_observability_sqlite_write_or_raise_disposes_on_io_error(
+    tmp_path: Path,
+) -> None:
+    """Real I/O errors (OSError, SQLAlchemyError) DO need a dispose to drop
+    the potentially stale engine pool. Mirror image of the validation test
+    above. See PR #651 review #5.
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    class FailingRepository:
+        def insert_or_raise(self, record: object) -> bool:
+            raise SQLAlchemyError("driver fault")
+
+    record = validate_observability_record(_payload())
+    writer = ObservabilitySqliteWriter(path=tmp_path / "observability.db")
+    writer._repository = FailingRepository()
+
+    dispose_calls: list[None] = []
+    original_dispose = writer._store.dispose
+
+    def _track_dispose() -> None:
+        dispose_calls.append(None)
+        original_dispose()
+
+    writer._store.dispose = _track_dispose  # type: ignore[method-assign]
+
+    with pytest.raises(SQLAlchemyError):
+        writer.write_or_raise(record)
+
+    assert len(dispose_calls) == 1
+
+
+def test_observability_sqlite_write_or_raise_disposes_on_corruption_retry_error(
+    tmp_path: Path,
+) -> None:
+    """After a corruption rebuild, a second DB/I/O failure should dispose the
+    fresh engine state before surfacing to the foreground caller.
+    """
+    from sqlalchemy.exc import DatabaseError, SQLAlchemyError
+
+    class CorruptError(Exception):
+        sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+
+    class RetryFailingRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def insert_or_raise(self, record: object) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                raise DatabaseError("INSERT", {}, CorruptError())
+            raise SQLAlchemyError("retry driver fault")
+
+    record = validate_observability_record(_payload())
+    writer = ObservabilitySqliteWriter(path=tmp_path / "observability.db")
+    repo = RetryFailingRepository()
+    writer._repository = repo
+    writer._store.handle_corruption = lambda _exc: None  # type: ignore[method-assign]
+
+    dispose_calls: list[None] = []
+    original_dispose = writer._store.dispose
+
+    def _track_dispose() -> None:
+        dispose_calls.append(None)
+        original_dispose()
+
+    writer._store.dispose = _track_dispose  # type: ignore[method-assign]
+
+    with pytest.raises(SQLAlchemyError, match="retry driver fault"):
+        writer.write_or_raise(record)
+
+    assert repo.calls == 2
+    assert len(dispose_calls) == 1
 
 
 def test_observability_sqlite_columns_are_core_index_and_correlation_only(

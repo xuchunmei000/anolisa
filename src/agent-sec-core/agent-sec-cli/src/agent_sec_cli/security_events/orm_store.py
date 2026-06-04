@@ -31,10 +31,6 @@ _SQLITE_SCHEMA_ERROR_MARKERS = (
     "no such column",
     "no such table",
 )
-_SQLITE_BUSY_ERROR_MARKERS = (
-    "database is locked",
-    "database table is locked",
-)
 _IDENTIFIER_RE = re.compile(r"^[a-z_]+$")
 
 OrmModel = type[Base]
@@ -267,22 +263,19 @@ def _sqlite_primary_error_code(exc: Exception) -> int | None:
     return None
 
 
-def is_sqlite_corruption_error(exc: Exception) -> bool:
+def _is_sqlite_corruption_error(exc: Exception) -> bool:
     """Return True only for errors that indicate true DB corruption."""
     code = _sqlite_primary_error_code(exc)
     return code in _SQLITE_CORRUPTION_CODES
 
 
-def is_sqlite_busy_error(exc: Exception) -> bool:
+def _is_sqlite_busy_error(exc: Exception) -> bool:
     """Return True for SQLite busy/locked errors after the busy timeout expires."""
     code = _sqlite_primary_error_code(exc)
-    if code in _SQLITE_BUSY_CODES:
-        return True
-    message = str(getattr(exc, "orig", exc)).lower()
-    return any(marker in message for marker in _SQLITE_BUSY_ERROR_MARKERS)
+    return code in _SQLITE_BUSY_CODES
 
 
-def is_sqlite_schema_error(exc: Exception) -> bool:
+def _is_sqlite_schema_error(exc: Exception) -> bool:
     """Return True for errors that can be repaired by schema convergence."""
     code = _sqlite_primary_error_code(exc)
     if code == sqlite3.SQLITE_SCHEMA:
@@ -362,7 +355,7 @@ class SqliteStore:
             except DatabaseError as exc:
                 if raise_on_error:
                     raise
-                if self.read_only or not is_sqlite_corruption_error(exc):
+                if self.read_only or not _is_sqlite_corruption_error(exc):
                     print(
                         f"{self._log_prefix} schema init failure: {exc}",
                         file=sys.stderr,
@@ -502,9 +495,6 @@ __all__ = [
     "create_sqlite_engine",
     "ensure_schema",
     "ensure_schema_if_needed",
-    "is_sqlite_busy_error",
-    "is_sqlite_corruption_error",
-    "is_sqlite_schema_error",
     "normalize_sqlite_path",
     "register_orm_models",
     "SchemaMigration",

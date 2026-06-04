@@ -13,18 +13,19 @@ from agent_sec_cli.security_events.models import SecurityEventRecord
 from agent_sec_cli.security_events.orm_store import (
     Base,
     SqliteStore,
+    _is_sqlite_busy_error,
+    _is_sqlite_corruption_error,
+    _is_sqlite_schema_error,
     create_sqlite_engine,
     ensure_schema,
     ensure_schema_if_needed,
-    is_sqlite_corruption_error,
-    is_sqlite_schema_error,
     normalize_sqlite_path,
     sqlite_database_files,
 )
 from agent_sec_cli.security_events.repositories import SecurityEventRepository
 from agent_sec_cli.security_events.schema import SecurityEvent
 from sqlalchemy import Index, Integer, Text, inspect, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 
@@ -99,7 +100,17 @@ def test_sqlite_corruption_classification_uses_result_code(tmp_path: Path) -> No
         finally:
             conn.close()
 
-    assert is_sqlite_corruption_error(exc_info.value)
+    assert _is_sqlite_corruption_error(exc_info.value)
+
+
+def test_sqlite_busy_classification_requires_result_code() -> None:
+    exc = DatabaseError(
+        "INSERT",
+        {},
+        RuntimeError("connection error: database is locked-out by admin"),
+    )
+
+    assert not _is_sqlite_busy_error(exc)
 
 
 def test_write_engine_preserves_sqlite_pragmas(tmp_path: Path) -> None:
@@ -380,7 +391,7 @@ def test_sqlite_schema_error_classification_uses_message() -> None:
     class SchemaError(Exception):
         sqlite_errorcode = sqlite3.SQLITE_ERROR
 
-    assert is_sqlite_schema_error(SchemaError("no such table: security_events"))
+    assert _is_sqlite_schema_error(SchemaError("no such table: security_events"))
 
 
 def test_sqlite_store_reuses_session_factory_across_repositories(

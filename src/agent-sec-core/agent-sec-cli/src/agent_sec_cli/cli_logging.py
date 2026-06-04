@@ -3,6 +3,7 @@
 import logging
 import os
 import traceback as traceback_module
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 from agent_sec_cli.correlation_context import (
     get_current_trace_context,
     get_invocation_id,
+    truncate_correlation_id,
 )
 from agent_sec_cli.security_events.config import get_stream_log_path
 from agent_sec_cli.security_events.writer import JsonlEventWriter
@@ -87,6 +89,33 @@ def _resolve_log_path() -> Path | None:
         return None
 
 
+def _clean_correlation_value(field_name: str, value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return truncate_correlation_id(field_name, stripped)
+
+
+def _json_safe(value: Any) -> Any:
+    """Return a JSON-serializable representation for diagnostic payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _has_exception(exc_info: object) -> bool:
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3:
+        return False
+    exc_type, exception, _traceback = exc_info
+    return exc_type is not None and exception is not None
+
+
 def resolve_cli_logging_config() -> CliLoggingConfig:
     """Resolve CLI diagnostic logging settings from environment variables."""
     level_enabled, level = _resolve_level(os.environ.get(_ENV_LOG_LEVEL))
@@ -129,17 +158,26 @@ class JsonlCliLogHandler(logging.Handler):
         }
 
         # Correlation slots: process trace context first, then per-record
-        # overrides via extra={"trace_id": ...}. Only stamp when non-empty —
-        # do not fabricate UUIDs to fill empty slots.
+        # overrides via extra={"trace_id": ...}. Only stamp when the value is
+        # a non-empty string — TraceContext fields are always typed as such,
+        # but ``record.<field>`` comes from caller-supplied ``extra={...}``
+        # and a misuse like ``extra={"trace_id": trace_ctx}`` (passing the
+        # whole object) must NOT silently overwrite a real id with a repr.
         trace_ctx = get_current_trace_context()
         if trace_ctx is not None:
             for field_name in _CORRELATION_FIELDS:
-                value = getattr(trace_ctx, field_name, None)
-                if value:
+                value = _clean_correlation_value(
+                    field_name,
+                    getattr(trace_ctx, field_name, None),
+                )
+                if value is not None:
                     payload[field_name] = value
         for field_name in _CORRELATION_FIELDS:
-            value = getattr(record, field_name, None)
-            if value:
+            value = _clean_correlation_value(
+                field_name,
+                getattr(record, field_name, None),
+            )
+            if value is not None:
                 payload[field_name] = value
 
         # Free-form payload slot. Caller owns shape (string or dict); no
@@ -147,18 +185,17 @@ class JsonlCliLogHandler(logging.Handler):
         # guard against leaking large or sensitive content here.
         data = getattr(record, "data", None)
         if data is not None:
-            payload["data"] = data
+            payload["data"] = _json_safe(data)
 
-        if record.exc_info:
+        if _has_exception(record.exc_info):
             exception = record.exc_info[1]
-            if exception is not None:
-                payload["error_type"] = type(exception).__name__
-                payload["exception"] = str(exception)
+            payload["error_type"] = type(exception).__name__
+            payload["exception"] = str(exception)
             if record.levelno >= logging.ERROR:
                 payload["traceback"] = "".join(
                     traceback_module.format_exception(*record.exc_info)
                 )
-        return payload
+        return _json_safe(payload)
 
 
 def setup_cli_logging() -> None:
@@ -172,7 +209,6 @@ def setup_cli_logging() -> None:
     if _SETUP_DONE:
         return
     logger = logging.getLogger(_LOGGER_NAME)
-    logger.propagate = False
     try:
         config = resolve_cli_logging_config()
         if config.enabled and config.log_file is not None:
@@ -180,6 +216,7 @@ def setup_cli_logging() -> None:
             handler.setLevel(config.level)
             logger.addHandler(handler)
             logger.setLevel(config.level)
+            logger.propagate = False
     except Exception:  # noqa: BLE001 - diagnostic logging setup is best-effort
         pass
     finally:

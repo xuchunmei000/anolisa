@@ -72,8 +72,6 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
     ctx = RequestContext(action=action, caller=_detect_caller())
     started_at = time.perf_counter()
 
-    backend = router.get_backend(action)
-
     logger.debug(
         "action started",
         extra={
@@ -81,6 +79,24 @@ def invoke(action: str, **kwargs: Any) -> ActionResult:
             "data": {"action": action, "caller": ctx.caller},
         },
     )
+    try:
+        backend = router.get_backend(action)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.error(
+            "action routing failed",
+            exc_info=True,
+            extra={
+                "trace_id": ctx.trace_id,
+                "data": {
+                    "action": action,
+                    "caller": ctx.caller,
+                    "duration_ms": duration_ms,
+                },
+            },
+        )
+        raise
+
     lifecycle.pre_action(ctx, kwargs)
 
     try:

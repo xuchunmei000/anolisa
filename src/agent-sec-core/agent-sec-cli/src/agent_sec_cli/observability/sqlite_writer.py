@@ -17,8 +17,8 @@ from agent_sec_cli.observability.repositories import (
 from agent_sec_cli.observability.schema import ObservabilityRecord
 from agent_sec_cli.security_events.orm_store import (
     SqliteStore,
-    is_sqlite_corruption_error,
-    is_sqlite_schema_error,
+    _is_sqlite_corruption_error,
+    _is_sqlite_schema_error,
 )
 from agent_sec_cli.security_events.sqlite_maintenance import (
     run_sqlite_maintenance_if_due,
@@ -65,23 +65,42 @@ class ObservabilitySqliteWriter:
             pass
 
     def write_or_raise(self, record: ObservabilityRecord) -> None:
-        """Insert *record* into SQLite and raise on foreground ingestion failure."""
+        """Insert *record* into SQLite and raise on foreground ingestion failure.
+
+        Distinguishes three failure classes so the engine pool only gets torn
+        down for actual I/O / DB faults:
+
+        * ``ValueError`` / ``TypeError`` — caller-supplied record is malformed.
+          The repository never touched the engine; just propagate.
+        * ``DatabaseError`` — corruption is rebuilt; schema drift requests a
+          repair; everything else surfaces.
+        * ``SQLAlchemyError`` / ``OSError`` — real I/O or driver fault; the
+          pooled engine is potentially stale, so dispose before propagating.
+        """
         if self._store.disabled:
             raise OSError("observability SQLite store is disabled")
 
         try:
-            if not self._repository.insert(record):
+            if not self._repository.insert_or_raise(record):
                 raise OSError("observability SQLite write was skipped")
+        except (ValueError, TypeError):
+            raise
         except DatabaseError as exc:
-            if not is_sqlite_corruption_error(exc):
-                if is_sqlite_schema_error(exc):
+            if not _is_sqlite_corruption_error(exc):
+                if _is_sqlite_schema_error(exc):
                     self._store.request_schema_repair()
                 raise
             self._store.handle_corruption(exc)
             if self._store.disabled:
                 raise OSError("observability SQLite store is disabled") from exc
-            if not self._repository.insert(record):
-                raise OSError("observability SQLite write was skipped") from exc
+            try:
+                if not self._repository.insert_or_raise(record):
+                    raise OSError("observability SQLite write was skipped")
+            except (ValueError, TypeError):
+                raise
+            except Exception as retry_exc:  # noqa: BLE001
+                self._store.dispose()
+                raise retry_exc from exc
         except (SQLAlchemyError, OSError):
             self._store.dispose()
             raise

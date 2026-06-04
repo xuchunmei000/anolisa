@@ -229,3 +229,41 @@ def test_generated_invocation_id_is_stable_and_visible_from_worker_threads():
 
     assert invocation_id
     assert worker_invocation_id == invocation_id
+
+
+def test_concurrent_init_invocation_context_is_atomic(monkeypatch):
+    """Without locking, two threads racing into ``init_invocation_context``
+    would each generate a UUID and one would silently overwrite the other,
+    so records emitted by the loser before the overwrite would carry an id
+    that no longer matches the process-level value. See PR #651 review #8.
+    """
+    import threading
+
+    clear_invocation_context_for_tests()
+    monkeypatch.delenv("AGENT_SEC_INVOCATION_ID", raising=False)
+
+    n_threads = 32
+    barrier = threading.Barrier(n_threads)
+    seen: list[str] = []
+    seen_lock = threading.Lock()
+
+    def _race() -> None:
+        barrier.wait()
+        init_invocation_context()
+        observed = get_invocation_id()
+        with seen_lock:
+            seen.append(observed)
+
+    threads = [threading.Thread(target=_race) for _ in range(n_threads)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(seen) == n_threads
+        assert (
+            len(set(seen)) == 1
+        ), f"all racing threads must observe the same invocation id; got {set(seen)}"
+    finally:
+        clear_invocation_context_for_tests()

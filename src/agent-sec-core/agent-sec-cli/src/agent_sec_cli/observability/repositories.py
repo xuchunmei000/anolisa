@@ -1,12 +1,10 @@
 """Typed repository for observability SQLite indexing."""
 
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from agent_sec_cli.observability.config import OBSERVABILITY_LOG_PREFIX
 from agent_sec_cli.observability.models import ObservabilityEventRecord
 from agent_sec_cli.observability.schema import ObservabilityRecord
 from agent_sec_cli.security_events.orm_store import SqliteStore
@@ -47,15 +45,24 @@ class ObservabilityEventRepository:
     def insert(self, record: ObservabilityRecord) -> bool:
         """Insert an observability record. Returns False for skipped writes."""
         try:
-            values = self._record_values(record)
-        except (ValueError, TypeError) as exc:
-            print(
-                f"{OBSERVABILITY_LOG_PREFIX} invalid event params: {exc}",
-                file=sys.stderr,
-            )
+            return self.insert_or_raise(record)
+        except (ValueError, TypeError):
+            return False
+        except (SQLAlchemyError, OSError):
+            self._store.dispose()
             return False
 
-        session_factory = self._store.session_factory()
+    def insert_or_raise(self, record: ObservabilityRecord) -> bool:
+        """Insert an observability record and surface foreground failures.
+
+        Returns ``False`` when the underlying store is disabled and the write
+        was skipped without touching SQLite. Raises ``ValueError`` /
+        ``TypeError`` when *record* is malformed: this is a caller bug, not an
+        I/O fault, so the engine pool must NOT be torn down on its account.
+        """
+        values = self._record_values(record)
+
+        session_factory = self._store.session_factory(raise_on_error=True)
         if session_factory is None:
             return False
 

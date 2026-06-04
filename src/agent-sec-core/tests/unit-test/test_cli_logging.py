@@ -4,6 +4,7 @@ import json
 import logging
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -280,6 +281,25 @@ def test_handler_records_error_exception_metadata(tmp_path: Path) -> None:
     assert "ValueError: bad value" in payload["traceback"]
 
 
+def test_handler_ignores_empty_exc_info_tuple(tmp_path: Path) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record(
+        level=logging.ERROR,
+        msg="error called outside an active exception",
+        exc_info=(None, None, None),
+    )
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["level"] == "ERROR"
+    assert "error_type" not in payload
+    assert "exception" not in payload
+    assert "traceback" not in payload
+
+
 def test_handler_omits_traceback_for_warning_with_exception_info(
     tmp_path: Path,
 ) -> None:
@@ -302,6 +322,28 @@ def test_handler_omits_traceback_for_warning_with_exception_info(
     assert payload["error_type"] == "ValueError"
     assert payload["exception"] == "warning value"
     assert "traceback" not in payload
+
+
+def test_handler_stringifies_non_json_data_values(tmp_path: Path) -> None:
+    init_invocation_context()
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    observed_at = datetime(2026, 6, 4, tzinfo=timezone.utc)
+    record.data = {
+        "path": Path("/tmp/x"),
+        "observed_at": observed_at,
+        "nested": {"items": [Path("relative")]},
+    }
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["data"] == {
+        "path": "/tmp/x",
+        "observed_at": str(observed_at),
+        "nested": {"items": ["relative"]},
+    }
 
 
 def test_handler_does_not_chmod_log_file_on_emit(tmp_path: Path) -> None:
@@ -358,7 +400,7 @@ def test_setup_cli_logging_disables_root_propagation(
         ("AGENT_SEC_CLI_LOG_LEVEL", "off"),
     ],
 )
-def test_setup_cli_logging_disables_root_propagation_when_logging_is_disabled(
+def test_setup_cli_logging_preserves_root_propagation_when_logging_is_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env_name: str,
@@ -378,7 +420,7 @@ def test_setup_cli_logging_disables_root_propagation_when_logging_is_disabled(
         if isinstance(handler, JsonlCliLogHandler)
     ]
     assert handlers == []
-    assert logger.propagate is False
+    assert logger.propagate is True
 
 
 def test_setup_cli_logging_handler_failure_is_sticky_no_retry(
@@ -412,3 +454,31 @@ def test_setup_cli_logging_handler_failure_is_sticky_no_retry(
         if isinstance(handler, JsonlCliLogHandler)
     ]
     assert handlers == []
+    assert logger.propagate is True
+
+
+def test_handler_ignores_non_string_correlation_field_overrides(tmp_path: Path) -> None:
+    """A misuse like ``extra={"trace_id": trace_ctx_object}`` must NOT
+    silently overwrite the real string trace_id with a repr — a downstream
+    ``WHERE trace_id = ?`` query would fail with that. Non-string values are
+    skipped, leaving the process-level value intact. See PR #651 review #13.
+    """
+    init_invocation_context()
+    init_process_trace_context(
+        TraceContext(trace_id="real-trace", session_id="real-session")
+    )
+    path = tmp_path / "cli.jsonl"
+    handler = JsonlCliLogHandler(path)
+    record = _make_record()
+    # Caller mistakenly passes the whole context object instead of a string id.
+    record.trace_id = TraceContext(trace_id="ignored")
+    record.session_id = 12345  # int instead of str
+    record.run_id = "real-run"  # this one is fine
+
+    handler.emit(record)
+
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    # Process-level value preserved — record-level non-string did not overwrite.
+    assert payload["trace_id"] == "real-trace"
+    assert payload["session_id"] == "real-session"
+    assert payload["run_id"] == "real-run"
