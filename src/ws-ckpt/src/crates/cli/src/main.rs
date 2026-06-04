@@ -88,7 +88,7 @@ enum Commands {
         workspace: String,
 
         /// Target snapshot (ID like msg1-step2, or name like before-refactor)
-        #[arg(long = "snapshot", short = 's')]
+        #[arg(long = "snapshot", short = 's', value_parser = snapshot_id_value_parser())]
         to: String,
     },
 
@@ -99,7 +99,7 @@ enum Commands {
         workspace: Option<String>,
 
         /// Snapshot ID or unique prefix
-        #[arg(long, short = 's')]
+        #[arg(long, short = 's', value_parser = snapshot_id_value_parser())]
         snapshot: String,
 
         /// Skip confirmation prompt
@@ -125,11 +125,11 @@ enum Commands {
         workspace: String,
 
         /// Source snapshot (ID or name)
-        #[arg(long, short = 'f')]
+        #[arg(long, short = 'f', value_parser = snapshot_id_value_parser())]
         from: String,
 
         /// Target snapshot (ID or name)
-        #[arg(long, short = 't')]
+        #[arg(long, short = 't', value_parser = snapshot_id_value_parser())]
         to: String,
     },
 
@@ -1433,6 +1433,75 @@ mod tests {
         for good in ["snap-1", "msg1-step2", "before-refactor", "v1.2.3"] {
             Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", good])
                 .unwrap_or_else(|_| panic!("expected acceptance for id {:?}", good));
+        }
+    }
+
+    // Cases that go through `snapshot_id_value_parser`. Each row is
+    // (label, args-with-`SNAP`-placeholder); `SNAP` is replaced per bad value.
+    fn snapshot_arg_invocations() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            (
+                "rollback -s",
+                vec!["ws-ckpt", "rollback", "-w", "/ws", "-s", "SNAP"],
+            ),
+            (
+                "delete -s",
+                vec!["ws-ckpt", "delete", "-w", "/ws", "-s", "SNAP"],
+            ),
+            (
+                "diff -f",
+                vec!["ws-ckpt", "diff", "-w", "/ws", "-f", "SNAP", "-t", "ok"],
+            ),
+            (
+                "diff -t",
+                vec!["ws-ckpt", "diff", "-w", "/ws", "-f", "ok", "-t", "SNAP"],
+            ),
+        ]
+    }
+
+    #[test]
+    fn parse_rejects_empty_or_whitespace_snapshot_args() {
+        for (label, template) in snapshot_arg_invocations() {
+            for blank in ["", " ", "   ", "\t"] {
+                let args: Vec<&str> = template
+                    .iter()
+                    .map(|a| if *a == "SNAP" { blank } else { *a })
+                    .collect();
+                let err = Cli::try_parse_from(&args).err().unwrap_or_else(|| {
+                    panic!("{}: expected parse error for blank {:?}", label, blank)
+                });
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "{}: blank {:?} should fail with ValueValidation, got {:?}",
+                    label,
+                    blank,
+                    err.kind()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_rejects_path_traversal_snapshot_args() {
+        for (label, template) in snapshot_arg_invocations() {
+            for bad in ["foo/bar", "..", ".", "a\\b", "/abs"] {
+                let args: Vec<&str> = template
+                    .iter()
+                    .map(|a| if *a == "SNAP" { bad } else { *a })
+                    .collect();
+                let err = Cli::try_parse_from(&args).err().unwrap_or_else(|| {
+                    panic!("{}: expected parse error for value {:?}", label, bad)
+                });
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "{}: value {:?} should fail with ValueValidation, got {:?}",
+                    label,
+                    bad,
+                    err.kind()
+                );
+            }
         }
     }
 
