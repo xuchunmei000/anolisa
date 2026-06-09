@@ -62,6 +62,52 @@ def test_observability_reader_lists_sessions_runs_and_events(tmp_path: Path) -> 
     assert json.loads(events[1].metrics_json)["tool_name"] == "pytest"
 
 
+def test_observability_reader_counts_sessions_and_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "observability.db"
+    writer = ObservabilitySqliteWriter(path=db_path, max_age_days=None)
+    _seed(
+        writer,
+        session_id="session-A",
+        run_id="run-A",
+        observed_at="2026-05-16T12:00:00Z",
+    )
+    _seed(
+        writer,
+        session_id="session-A",
+        run_id="run-B",
+        observed_at="2026-05-16T12:00:01Z",
+    )
+    _seed(
+        writer,
+        session_id="session-B",
+        run_id="run-C",
+        observed_at="2026-05-17T12:00:00Z",
+    )
+    writer.close()
+
+    reader = ObservabilityReader(path=db_path)
+    try:
+        assert reader.count_sessions() == 2
+        assert reader.count_runs("session-A") == 2
+        assert (
+            reader.count_sessions(
+                start_epoch=1778932800.0,
+                end_epoch=1779019200.0,
+            )
+            == 1
+        )
+        assert (
+            reader.count_runs(
+                "session-A",
+                start_epoch=1778932800.0,
+                end_epoch=1779019200.0,
+            )
+            == 2
+        )
+    finally:
+        reader.close()
+
+
 def test_observability_reader_close_disposes_store(tmp_path: Path) -> None:
     db_path = tmp_path / "observability.db"
     writer = ObservabilitySqliteWriter(path=db_path, max_age_days=None)

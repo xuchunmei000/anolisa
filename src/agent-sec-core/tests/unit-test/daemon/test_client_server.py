@@ -937,7 +937,14 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
     assert snapshot["prompt_scan"]["status"] == "pending"
     assert registry.methods() == (
         "daemon.health",
+        "obs.runs.list",
+        "obs.sessions.list",
+        "obs.timeline.get",
         "scan-prompt",
+        "sec.events.count_by",
+        "sec.events.get",
+        "sec.events.list",
+        "sec.summary",
         "skill_ledger.skillfs_notify_change",
     )
     assert _matching_modules(heavy_prefixes) == before

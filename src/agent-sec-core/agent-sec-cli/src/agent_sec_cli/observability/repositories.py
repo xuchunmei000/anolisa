@@ -87,11 +87,81 @@ class ObservabilityEventRepository:
             self._store.dispose()
             return 0
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def count_sessions(
+        self,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+    ) -> int:
+        """Return the number of distinct sessions matching optional time filters."""
+        session_factory = self._store.session_factory()
+        if session_factory is None:
+            return 0
+
+        conditions: list[Any] = []
+        if start_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch >= start_epoch)
+        if end_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch < end_epoch)
+
+        stmt = select(
+            func.count(func.distinct(ObservabilityEventRecord.session_id))
+        ).where(*conditions)
+
+        try:
+            with session_factory() as session:
+                return int(session.execute(stmt).scalar_one())
+        except SQLAlchemyError:
+            self._store.dispose()
+            return 0
+
+    def count_runs(
+        self,
+        session_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+    ) -> int:
+        """Return the number of distinct runs in a session matching time filters."""
+        session_factory = self._store.session_factory()
+        if session_factory is None:
+            return 0
+
+        conditions: list[Any] = [ObservabilityEventRecord.session_id == session_id]
+        if start_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch >= start_epoch)
+        if end_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch < end_epoch)
+
+        stmt = select(func.count(func.distinct(ObservabilityEventRecord.run_id))).where(
+            *conditions
+        )
+
+        try:
+            with session_factory() as session:
+                return int(session.execute(stmt).scalar_one())
+        except SQLAlchemyError:
+            self._store.dispose()
+            return 0
+
+    def list_sessions(
+        self,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[SessionSummary]:
         """Return all sessions ordered by most recent activity descending."""
         session_factory = self._store.session_factory()
         if session_factory is None:
             return []
+
+        conditions: list[Any] = []
+        if start_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch >= start_epoch)
+        if end_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch < end_epoch)
 
         stmt = (
             select(
@@ -105,9 +175,14 @@ class ObservabilityEventRepository:
                 ),
                 func.count().label("event_count"),
             )
+            .where(*conditions)
             .group_by(ObservabilityEventRecord.session_id)
             .order_by(func.max(ObservabilityEventRecord.observed_at_epoch).desc())
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
 
         try:
             with session_factory() as session:
@@ -127,7 +202,15 @@ class ObservabilityEventRepository:
             for row in rows
         ]
 
-    def list_runs(self, session_id: str) -> list[RunSummary]:
+    def list_runs(
+        self,
+        session_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RunSummary]:
         """Return all runs in *session_id* ordered chronologically.
 
         Two queries (constant, not N+1):
@@ -138,6 +221,12 @@ class ObservabilityEventRepository:
         if session_factory is None:
             return []
 
+        conditions: list[Any] = [ObservabilityEventRecord.session_id == session_id]
+        if start_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch >= start_epoch)
+        if end_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch < end_epoch)
+
         stats_stmt = (
             select(
                 ObservabilityEventRecord.run_id,
@@ -147,10 +236,14 @@ class ObservabilityEventRepository:
                 func.max(ObservabilityEventRecord.observed_at_epoch).label("ended_at"),
                 func.count().label("event_count"),
             )
-            .where(ObservabilityEventRecord.session_id == session_id)
+            .where(*conditions)
             .group_by(ObservabilityEventRecord.run_id)
             .order_by(func.min(ObservabilityEventRecord.observed_at_epoch).asc())
         )
+        if limit is not None:
+            stats_stmt = stats_stmt.limit(limit)
+        if offset:
+            stats_stmt = stats_stmt.offset(offset)
 
         first_before_run_subq = (
             select(
@@ -166,10 +259,7 @@ class ObservabilityEventRepository:
                 )
                 .label("rn"),
             )
-            .where(
-                ObservabilityEventRecord.session_id == session_id,
-                ObservabilityEventRecord.hook == "before_agent_run",
-            )
+            .where(*conditions, ObservabilityEventRecord.hook == "before_agent_run")
             .subquery()
         )
         before_run_stmt = select(
@@ -200,21 +290,38 @@ class ObservabilityEventRepository:
         ]
 
     def list_events(
-        self, session_id: str, run_id: str
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ObservabilityEventRecord]:
         """Return all events for *run_id* in *session_id* ordered ascending."""
         session_factory = self._store.session_factory()
         if session_factory is None:
             return []
 
+        conditions: list[Any] = [
+            ObservabilityEventRecord.session_id == session_id,
+            ObservabilityEventRecord.run_id == run_id,
+        ]
+        if start_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch >= start_epoch)
+        if end_epoch is not None:
+            conditions.append(ObservabilityEventRecord.observed_at_epoch < end_epoch)
+
         stmt = (
             select(ObservabilityEventRecord)
-            .where(
-                ObservabilityEventRecord.session_id == session_id,
-                ObservabilityEventRecord.run_id == run_id,
-            )
+            .where(*conditions)
             .order_by(ObservabilityEventRecord.observed_at_epoch.asc())
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
 
         try:
             with session_factory() as session:

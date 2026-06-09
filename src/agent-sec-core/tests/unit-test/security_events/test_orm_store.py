@@ -24,6 +24,11 @@ from agent_sec_cli.security_events.orm_store import (
 )
 from agent_sec_cli.security_events.repositories import SecurityEventRepository
 from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.schema_version import (
+    SECURITY_EVENTS_SQLITE_SCHEMA_REVISIONS,
+    SECURITY_EVENTS_SQLITE_SCHEMA_VERSION,
+    SECURITY_EVENTS_VERDICT_SCHEMA_VERSION,
+)
 from sqlalchemy import Index, Integer, Text, inspect, text
 from sqlalchemy.exc import DatabaseError, SQLAlchemyError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
@@ -87,6 +92,18 @@ class _SchemaRepairRaceStore(SqliteStore):
         self._db_identity = db_identity
         self._session_factory = sessionmaker(expire_on_commit=False, future=True)
         self._force_schema_convergence = False
+
+
+def test_schema_version_tracks_revision_history() -> None:
+    revisions = SECURITY_EVENTS_SQLITE_SCHEMA_REVISIONS
+
+    assert SECURITY_EVENTS_SQLITE_SCHEMA_VERSION == max(revisions)
+    assert sorted(revisions) == list(
+        range(1, SECURITY_EVENTS_SQLITE_SCHEMA_VERSION + 1)
+    )
+    assert orm_store._SCHEMA_VERSION == SECURITY_EVENTS_SQLITE_SCHEMA_VERSION
+    assert SECURITY_EVENTS_VERDICT_SCHEMA_VERSION in revisions
+    assert "verdict" in revisions[SECURITY_EVENTS_VERDICT_SCHEMA_VERSION]
 
 
 def test_sqlite_corruption_classification_uses_result_code(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 """Unit tests for security_events.sqlite_reader — SqliteEventReader."""
 
 import io
+import os
 import sqlite3
 import sys
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.schema import SecurityEvent, extract_verdict
 from agent_sec_cli.security_events.sqlite_reader import SqliteEventReader
 from agent_sec_cli.security_events.sqlite_writer import SqliteEventWriter
 
@@ -295,6 +296,169 @@ class TestSqliteEventReader:
 
         assert reader.count(trace_id="trace-abc") == 2
 
+    def test_count_respects_offset(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for idx, category in enumerate(("alpha", "beta", "alpha")):
+            writer.write(
+                SecurityEvent(
+                    event_type="scan",
+                    category=category,
+                    timestamp=(base + timedelta(seconds=idx)).isoformat(),
+                    trace_id=f"trace-{idx}",
+                    details={},
+                )
+            )
+
+        assert reader.count(offset=1) == 2
+        assert reader.count(category="alpha", offset=1) == 1
+
+    def test_count_by_respects_offset(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for idx, category in enumerate(("alpha", "beta", "alpha")):
+            writer.write(
+                SecurityEvent(
+                    event_type="scan",
+                    category=category,
+                    timestamp=(base + timedelta(seconds=idx)).isoformat(),
+                    trace_id=f"trace-{idx}",
+                    details={},
+                )
+            )
+
+        assert reader.count_by("category", offset=1) == {"alpha": 1, "beta": 1}
+
+    def test_query_naive_time_range_uses_local_timezone(
+        self,
+        writer: SqliteEventWriter,
+        reader: SqliteEventReader,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        if not hasattr(time, "tzset"):
+            pytest.skip("time.tzset is required to validate local timezone parsing")
+
+        old_tz = os.environ.get("TZ")
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        time.tzset()
+        try:
+            writer.write(
+                SecurityEvent(
+                    event_type="scan",
+                    category="prompt_scan",
+                    timestamp=datetime(
+                        2026, 5, 20, 4, 0, tzinfo=timezone.utc
+                    ).isoformat(),
+                    trace_id="local-match",
+                    details={},
+                )
+            )
+            writer.write(
+                SecurityEvent(
+                    event_type="scan",
+                    category="prompt_scan",
+                    timestamp=datetime(
+                        2026, 5, 20, 6, 0, tzinfo=timezone.utc
+                    ).isoformat(),
+                    trace_id="outside-window",
+                    details={},
+                )
+            )
+
+            events = reader.query(
+                since="2026-05-20T11:59:00",
+                until="2026-05-20T12:01:00",
+            )
+            assert [event.trace_id for event in events] == ["local-match"]
+        finally:
+            if old_tz is None:
+                monkeypatch.delenv("TZ", raising=False)
+            else:
+                monkeypatch.setenv("TZ", old_tz)
+            time.tzset()
+
+    def test_query_count_and_count_by_support_dashboard_filters(
+        self, writer: SqliteEventWriter, reader: SqliteEventReader
+    ) -> None:
+        in_window = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+        old = in_window - timedelta(days=1)
+        writer.write(
+            SecurityEvent(
+                event_type="code_scan",
+                category="code_scan",
+                result="failed",
+                timestamp=in_window.isoformat(),
+                trace_id="trace-1",
+                session_id="session-1",
+                run_id="run-1",
+                call_id="call-1",
+                tool_call_id="tool-1",
+                details={"request": {}, "result": {"verdict": "deny"}},
+            )
+        )
+        writer.write(
+            SecurityEvent(
+                event_type="prompt_scan",
+                category="prompt_scan",
+                result="succeeded",
+                timestamp=in_window.isoformat(),
+                trace_id="trace-2",
+                session_id="session-1",
+                run_id="run-2",
+                call_id="call-2",
+                tool_call_id="tool-2",
+                details={},
+            )
+        )
+        writer.write(
+            SecurityEvent(
+                event_type="code_scan",
+                category="code_scan",
+                result="failed",
+                timestamp=old.isoformat(),
+                trace_id="trace-old",
+                session_id="session-1",
+                run_id="run-old",
+                call_id="call-old",
+                tool_call_id="tool-old",
+                details={},
+            )
+        )
+
+        events = reader.query(
+            result="failed",
+            session_id="session-1",
+            run_id="run-1",
+            call_id="call-1",
+            tool_call_id="tool-1",
+            since=(in_window - timedelta(seconds=1)).isoformat(),
+            until=(in_window + timedelta(seconds=1)).isoformat(),
+        )
+
+        assert [event.trace_id for event in events] == ["trace-1"]
+        assert (
+            reader.count(
+                session_id="session-1",
+                since=(in_window - timedelta(seconds=1)).isoformat(),
+                until=(in_window + timedelta(seconds=1)).isoformat(),
+            )
+            == 2
+        )
+        assert reader.count_by(
+            "result",
+            session_id="session-1",
+            since=(in_window - timedelta(seconds=1)).isoformat(),
+            until=(in_window + timedelta(seconds=1)).isoformat(),
+        ) == {"failed": 1, "succeeded": 1}
+        assert reader.count_by(
+            "run_id",
+            session_id="session-1",
+            since=(in_window - timedelta(seconds=1)).isoformat(),
+            until=(in_window + timedelta(seconds=1)).isoformat(),
+        ) == {"run-1": 1, "run-2": 1}
+
     def test_count_by_category(
         self, writer: SqliteEventWriter, reader: SqliteEventReader
     ) -> None:
@@ -475,7 +639,7 @@ class TestSqliteEventReader:
 
         assert SqliteEventReader(path=db_path).query(limit=10) == []
         stderr = capsys.readouterr().err
-        assert "sqlite schema is v1, this binary expects v2" in stderr
+        assert "sqlite schema is v1, this binary expects v3" in stderr
         assert "run any write command" in stderr
         assert "read-only queries may return empty results until then" in stderr
 
@@ -736,3 +900,91 @@ class TestCorrelationCandidateQuery:
             )
             == []
         )
+
+
+class TestVerdictSqlFilter:
+    """Tests for SQL-backed verdict filtering."""
+
+    @pytest.fixture(autouse=True)
+    def _seed_events(self, writer: SqliteEventWriter) -> None:
+        """Seed events with varying verdicts."""
+        for idx, (verdict, category) in enumerate(
+            [
+                ("pass", "prompt_scan"),
+                ("deny", "prompt_scan"),
+                ("warn", "code_scan"),
+                ("pass", "pii_scan"),
+                (None, "skill_ledger"),  # no verdict
+                ("deny", "prompt_scan"),
+                ("deny", "code_scan"),
+            ]
+        ):
+            details: dict[str, Any] = {}
+            if verdict is not None:
+                if category == "code_scan" and verdict == "deny":
+                    details["result"] = {"verdict": verdict}
+                else:
+                    details["verdict"] = verdict
+            writer.write(
+                SecurityEvent(
+                    event_type=f"{category}_event",
+                    category=category,
+                    details=details,
+                    timestamp=(
+                        datetime(2025, 1, 1, tzinfo=timezone.utc)
+                        + timedelta(seconds=idx)
+                    ).isoformat(),
+                )
+            )
+        writer.close()
+
+    def test_query_filter_by_verdict(self, reader: SqliteEventReader) -> None:
+        events = reader.query(verdict="deny")
+        assert len(events) == 3
+        assert all(_details_verdict(e.details) == "deny" for e in events)
+
+    def test_query_verdict_with_pagination(self, reader: SqliteEventReader) -> None:
+        events = reader.query(verdict="pass", limit=1, offset=0)
+        assert len(events) == 1
+        assert _details_verdict(events[0].details) == "pass"
+
+        events_page2 = reader.query(verdict="pass", limit=1, offset=1)
+        assert len(events_page2) == 1
+
+    def test_count_with_verdict_filter(self, reader: SqliteEventReader) -> None:
+        assert reader.count(verdict="deny") == 3
+        assert reader.count(verdict="deny", offset=1) == 2
+        assert reader.count(verdict="pass") == 2
+        assert reader.count(verdict="warn") == 1
+        assert reader.count(verdict="nonexistent") == 0
+
+    def test_count_by_verdict(self, reader: SqliteEventReader) -> None:
+        groups = reader.count_by("verdict")
+        assert groups == {"pass": 2, "deny": 3, "warn": 1}
+        offset_groups = reader.count_by("verdict", offset=1)
+        assert offset_groups == {"pass": 2, "deny": 2, "warn": 1}
+
+    def test_count_by_verdict_with_category_filter(
+        self, reader: SqliteEventReader
+    ) -> None:
+        groups = reader.count_by("verdict", category="prompt_scan")
+        assert groups == {"pass": 1, "deny": 2}
+
+    def test_count_by_category_with_verdict_filter(
+        self, reader: SqliteEventReader
+    ) -> None:
+        groups = reader.count_by("category", verdict="deny")
+        assert groups == {"prompt_scan": 2, "code_scan": 1}
+        offset_groups = reader.count_by("category", verdict="deny", offset=1)
+        assert offset_groups == {"prompt_scan": 2}
+
+    def test_query_without_verdict_unchanged(self, reader: SqliteEventReader) -> None:
+        """Ensure queries without verdict still work via the SQL path."""
+        events = reader.query(limit=3)
+        assert len(events) == 3
+        total = reader.count()
+        assert total == 7
+
+
+def _details_verdict(details: dict[str, Any]) -> str | None:
+    return extract_verdict(details)

@@ -8,6 +8,21 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+def extract_verdict(details: dict[str, Any]) -> str | None:
+    """Return the event verdict embedded in *details*, if present."""
+    direct = details.get("verdict")
+    if isinstance(direct, str):
+        return direct
+
+    result = details.get("result")
+    if isinstance(result, dict):
+        nested = result.get("verdict")
+        if isinstance(nested, str):
+            return nested
+
+    return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

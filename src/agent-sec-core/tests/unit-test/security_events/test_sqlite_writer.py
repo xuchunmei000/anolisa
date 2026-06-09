@@ -147,6 +147,7 @@ class TestSqliteEventWriter:
             call_id="call-abc",
             tool_call_id="tool-abc",
             details={
+                "result": {"verdict": "deny"},
                 "nested": {"key": "value"},
                 "list": [1, 2, 3],
                 "unicode": "测试中文",
@@ -178,6 +179,7 @@ class TestSqliteEventWriter:
         assert row["run_id"] == "run-abc"
         assert row["call_id"] == "call-abc"
         assert row["tool_call_id"] == "tool-abc"
+        assert row["verdict"] == "deny"
 
         # Verify timestamp_epoch is correct
         expected_epoch = datetime.fromisoformat(evt.timestamp).timestamp()
@@ -508,8 +510,15 @@ class TestSqliteEventWriter:
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
 
-        assert user_version == 2
-        assert {"session_id", "run_id", "call_id", "tool_call_id"}.issubset(columns)
+        assert user_version == 3
+        assert {
+            "session_id",
+            "run_id",
+            "call_id",
+            "tool_call_id",
+            "verdict",
+        }.issubset(columns)
+        assert "idx_verdict_timestamp_epoch" in indexes
         assert "idx_session_id_timestamp_epoch" in indexes
         assert "idx_run_id_timestamp_epoch" in indexes
         assert "idx_session_run_timestamp_epoch" in indexes
@@ -543,7 +552,8 @@ class TestSqliteEventWriter:
             ) VALUES (
                 'old-event', 'code_scan', 'code_scan', 'succeeded',
                 '2026-05-19T00:00:00+00:00', 1779148800.0,
-                'old-trace', 1, 1, 'old-session', '{}'
+                'old-trace', 1, 1, 'old-session',
+                '{"result": {"verdict": "warn"}}'
             )
             """)
         conn.commit()
@@ -566,16 +576,133 @@ class TestSqliteEventWriter:
 
         conn = sqlite3.connect(db_path)
         rows = conn.execute(
-            "SELECT event_id, run_id FROM security_events ORDER BY event_id"
+            "SELECT event_id, run_id, verdict FROM security_events ORDER BY event_id"
         ).fetchall()
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
 
-        assert user_version == 2
-        assert ("old-event", None) in rows
+        assert user_version == 3
+        assert ("old-event", None, "warn") in rows
         assert any(
-            event_id != "old-event" and run_id == "new-run" for event_id, run_id in rows
+            event_id != "old-event" and run_id == "new-run"
+            for event_id, run_id, _verdict in rows
         )
+
+    def test_v2_database_migrates_verdict_column_and_backfills(
+        self, db_path: str
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE security_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT 'succeeded',
+                timestamp TEXT NOT NULL,
+                timestamp_epoch FLOAT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                pid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                session_id TEXT,
+                run_id TEXT,
+                call_id TEXT,
+                tool_call_id TEXT,
+                details TEXT NOT NULL
+            );
+            PRAGMA user_version = 2;
+            """)
+        conn.executemany(
+            """
+            INSERT INTO security_events (
+                event_id, event_type, category, result, timestamp, timestamp_epoch,
+                trace_id, pid, uid, session_id, run_id, call_id, tool_call_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "direct-verdict",
+                    "prompt_scan",
+                    "prompt_scan",
+                    "succeeded",
+                    "2026-05-19T00:00:00+00:00",
+                    1779148800.0,
+                    "trace-1",
+                    1,
+                    1,
+                    "session-1",
+                    "run-1",
+                    None,
+                    None,
+                    '{"verdict": "deny"}',
+                ),
+                (
+                    "nested-verdict",
+                    "code_scan",
+                    "code_scan",
+                    "succeeded",
+                    "2026-05-19T00:00:01+00:00",
+                    1779148801.0,
+                    "trace-2",
+                    1,
+                    1,
+                    "session-1",
+                    "run-1",
+                    None,
+                    None,
+                    '{"result": {"verdict": "pass"}}',
+                ),
+                (
+                    "no-verdict",
+                    "harden",
+                    "hardening",
+                    "succeeded",
+                    "2026-05-19T00:00:02+00:00",
+                    1779148802.0,
+                    "trace-3",
+                    1,
+                    1,
+                    "session-1",
+                    "run-1",
+                    None,
+                    None,
+                    "{}",
+                ),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        writer = SqliteEventWriter(path=db_path, max_age_days=None)
+        writer.write(
+            SecurityEvent(
+                event_id="new-event",
+                event_type="pii_scan",
+                category="pii_scan",
+                details={"verdict": "warn"},
+            )
+        )
+        writer.close()
+
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(security_events)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(security_events)")}
+        rows = dict(
+            conn.execute(
+                "SELECT event_id, verdict FROM security_events ORDER BY event_id"
+            ).fetchall()
+        )
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+
+        assert user_version == 3
+        assert "verdict" in columns
+        assert "idx_verdict_timestamp_epoch" in indexes
+        assert rows == {
+            "direct-verdict": "deny",
+            "nested-verdict": "pass",
+            "new-event": "warn",
+            "no-verdict": None,
+        }
 
     def test_schema_repairs_missing_indexes(self, db_path: str) -> None:
         conn = sqlite3.connect(db_path)
@@ -612,11 +739,12 @@ class TestSqliteEventWriter:
             "idx_category_epoch",
             "idx_trace_id",
             "idx_timestamp_epoch",
+            "idx_verdict_timestamp_epoch",
         }.issubset(index_names)
 
     def test_schema_error_requests_repair_for_next_write(self, db_path: str) -> None:
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute("PRAGMA user_version = 3")
         conn.commit()
         conn.close()
 

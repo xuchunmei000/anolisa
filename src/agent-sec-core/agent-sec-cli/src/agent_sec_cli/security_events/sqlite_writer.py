@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 from agent_sec_cli.security_events.config import get_db_path
+from agent_sec_cli.security_events.models import migrate_security_events_schema
 from agent_sec_cli.security_events.orm_store import (
     SqliteStore,
     _is_sqlite_busy_error,
@@ -35,7 +36,10 @@ class SqliteEventWriter:
         path: str | Path | None = None,
         max_age_days: int | None = 30,
     ) -> None:
-        self._store = SqliteStore(path or get_db_path())
+        self._store = SqliteStore(
+            path or get_db_path(),
+            schema_migrations=migrate_security_events_schema,
+        )
         self._repository = SecurityEventRepository(self._store)
         self._max_age_days = max_age_days
         self._write_lock = threading.Lock()

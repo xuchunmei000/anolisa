@@ -14,10 +14,12 @@ shared state, no ordering dependency, no cascade failures.
 """
 
 import json
+import os
+import sqlite3
 import time
+from pathlib import Path
 
-# Import shared helpers from conftest.py
-from .conftest import iso_now, require_loongshield, run_cli
+from cli.conftest import iso_now, require_loongshield, run_cli
 
 
 def _run_harden_and_expected_event_result() -> str:
@@ -33,6 +35,99 @@ def _run_harden_and_expected_event_result() -> str:
 
 def _expected_event_result(cli_result):
     return "succeeded" if cli_result.returncode == 0 else "failed"
+
+
+def _extract_verdict(details: dict) -> str | None:
+    """Return verdict from event details without importing agent_sec_cli internals."""
+    direct = details.get("verdict")
+    if isinstance(direct, str):
+        return direct
+
+    nested_result = details.get("result")
+    if isinstance(nested_result, dict):
+        nested = nested_result.get("verdict")
+        if isinstance(nested, str):
+            return nested
+
+    return None
+
+
+def _write_security_event_row(
+    *,
+    event_id: str,
+    event_type: str,
+    category: str,
+    result: str,
+    trace_id: str,
+    details: dict,
+) -> None:
+    data_dir = Path(os.environ["AGENT_SEC_DATA_DIR"])
+    db_path = data_dir / "security-events.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            PRAGMA user_version = 3;
+            CREATE TABLE IF NOT EXISTS security_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT 'succeeded',
+                timestamp TEXT NOT NULL,
+                timestamp_epoch FLOAT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                pid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                session_id TEXT,
+                run_id TEXT,
+                call_id TEXT,
+                tool_call_id TEXT,
+                verdict TEXT,
+                details TEXT NOT NULL
+            );
+            """)
+        conn.execute(
+            """
+            INSERT INTO security_events (
+                event_id,
+                event_type,
+                category,
+                result,
+                timestamp,
+                timestamp_epoch,
+                trace_id,
+                pid,
+                uid,
+                session_id,
+                run_id,
+                call_id,
+                tool_call_id,
+                verdict,
+                details
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                event_type,
+                category,
+                result,
+                "2026-06-09T00:00:00+00:00",
+                1780963200.0,
+                trace_id,
+                os.getpid(),
+                os.getuid(),
+                None,
+                None,
+                None,
+                None,
+                _extract_verdict(details),
+                json.dumps(details),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class TestHardenEventLogging:
@@ -365,16 +460,13 @@ class TestEventsSummaryFlag:
 # ---------------------------------------------------------------------------
 
 
-class TestErrorEventPersistence:
-    """Verify that error events are correctly persisted to SQLite."""
+class TestFailedEventQuery:
+    """Verify that persisted failed events are returned by the events CLI."""
 
-    def test_error_event_writes_to_sqlite(self):
-        """Integration test: verify that error events are actually written to SQLite with result='failed'."""
-        from agent_sec_cli.security_events import get_reader, log_event
-        from agent_sec_cli.security_events.schema import SecurityEvent
-
-        # Create an error event (simulating what lifecycle.on_error does)
-        error_event = SecurityEvent(
+    def test_failed_event_reads_from_sqlite(self):
+        """Verify that failed events are read from SQLite with result='failed'."""
+        _write_security_event_row(
+            event_id="error-event-e2e",
             event_type="harden",
             category="hardening",
             result="failed",
@@ -386,23 +478,19 @@ class TestErrorEventPersistence:
             trace_id="error-trace-123",
         )
 
-        # Write it via log_event (dual-write)
-        log_event(error_event)
+        result = run_cli("events", "--event-type", "harden", "--output", "json")
+        assert result.returncode == 0, f"events query failed: {result.stderr}"
 
-        # Read it back from SQLite
-        reader = get_reader()
-        events = reader.query(event_type="harden")
-
+        events = json.loads(result.stdout)
         assert len(events) == 1
         event = events[0]
 
-        # Verify error event was written correctly
-        assert event.event_type == "harden"  # NOT "harden_error"
-        assert event.result == "failed"
-        assert event.category == "hardening"
-        assert event.details["error"] == "loongshield not found"
-        assert event.details["error_type"] == "FileNotFoundError"
-        assert event.trace_id == "error-trace-123"
+        assert event["event_type"] == "harden"  # NOT "harden_error"
+        assert event["result"] == "failed"
+        assert event["category"] == "hardening"
+        assert event["details"]["error"] == "loongshield not found"
+        assert event["details"]["error_type"] == "FileNotFoundError"
+        assert event["trace_id"] == "error-trace-123"
 
 
 # ---------------------------------------------------------------------------

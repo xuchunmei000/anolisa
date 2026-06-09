@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -78,6 +79,95 @@ def test_daemon_health_over_unix_socket(
     assert not socket_path.exists()
     assert output.returncode == 0
     assert not _has_request_log(tmp_path, response["request_id"], "daemon.health")
+
+
+def test_daemon_security_events_list_reads_sqlite_over_unix_socket(
+    daemon_command: list[str], tmp_path: Path
+) -> None:
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    _write_security_event(tmp_path / "data" / "security-events.db")
+    process = _start_daemon(daemon_command, socket_path, tmp_path)
+
+    try:
+        response = _call_daemon(
+            socket_path,
+            {
+                "method": "sec.events.list",
+                "params": {
+                    "session_id": "session-e2e",
+                    "include_details": True,
+                },
+            },
+        )
+    finally:
+        output = _stop_daemon(process)
+
+    assert response["ok"] is True
+    assert response["data"]["total"] == 1
+    assert response["data"]["items"][0]["event_id"] == "event-e2e"
+    assert response["data"]["items"][0]["details"]["request"]["code"] == "echo e2e"
+    assert output.returncode == 0
+    assert _has_request_log(tmp_path, response["request_id"], "sec.events.list")
+
+
+def test_daemon_security_query_methods_read_sqlite_over_unix_socket(
+    daemon_command: list[str], tmp_path: Path
+) -> None:
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    _write_security_event(tmp_path / "data" / "security-events.db")
+    process = _start_daemon(daemon_command, socket_path, tmp_path)
+
+    try:
+        summary_response = _call_daemon(
+            socket_path,
+            {
+                "method": "sec.summary",
+                "params": {"session_id": "session-e2e"},
+            },
+        )
+        get_response = _call_daemon(
+            socket_path,
+            {
+                "method": "sec.events.get",
+                "params": {"event_id": "event-e2e"},
+            },
+        )
+        count_response = _call_daemon(
+            socket_path,
+            {
+                "method": "sec.events.count_by",
+                "params": {
+                    "group_by": "run_id",
+                    "session_id": "session-e2e",
+                },
+            },
+        )
+    finally:
+        output = _stop_daemon(process)
+
+    assert summary_response["ok"] is True
+    assert summary_response["data"]["total"] == 1
+    assert summary_response["data"]["by_category"] == {"code_scan": 1}
+    assert summary_response["data"]["affected_runs"] == 1
+    assert summary_response["data"]["latest_events"][0]["event_id"] == "event-e2e"
+
+    assert get_response["ok"] is True
+    assert get_response["data"]["found"] is True
+    assert get_response["data"]["event"]["event_id"] == "event-e2e"
+    assert get_response["data"]["event"]["details"]["request"]["code"] == "echo e2e"
+
+    assert count_response["ok"] is True
+    assert count_response["data"]["group_by"] == "run_id"
+    assert count_response["data"]["items"] == [{"value": "run-e2e", "count": 1}]
+
+    assert output.returncode == 0
+    assert _has_request_log(tmp_path, summary_response["request_id"], "sec.summary")
+    assert _has_request_log(tmp_path, get_response["request_id"], "sec.events.get")
+    assert _has_request_log(
+        tmp_path,
+        count_response["request_id"],
+        "sec.events.count_by",
+    )
 
 
 def test_daemon_uses_xdg_runtime_dir_by_default(
@@ -285,6 +375,74 @@ def test_daemon_skillfs_notify_refreshes_skill_ledger_activation(
         response["request_id"],
         "skill_ledger.skillfs_notify_change",
     )
+
+
+def _write_security_event(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            PRAGMA user_version = 3;
+            CREATE TABLE IF NOT EXISTS security_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT 'succeeded',
+                timestamp TEXT NOT NULL,
+                timestamp_epoch FLOAT NOT NULL,
+                trace_id TEXT NOT NULL DEFAULT '',
+                pid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                session_id TEXT,
+                run_id TEXT,
+                call_id TEXT,
+                tool_call_id TEXT,
+                verdict TEXT,
+                details TEXT NOT NULL
+            );
+            """)
+        conn.execute(
+            """
+            INSERT INTO security_events (
+                event_id,
+                event_type,
+                category,
+                result,
+                timestamp,
+                timestamp_epoch,
+                trace_id,
+                pid,
+                uid,
+                session_id,
+                run_id,
+                call_id,
+                tool_call_id,
+                verdict,
+                details
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "event-e2e",
+                "code_scan",
+                "code_scan",
+                "succeeded",
+                "2026-06-09T00:00:00+00:00",
+                1780963200.0,
+                "trace-e2e",
+                os.getpid(),
+                os.getuid(),
+                "session-e2e",
+                "run-e2e",
+                None,
+                "tool-e2e",
+                None,
+                json.dumps({"request": {"code": "echo e2e"}}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _start_daemon(

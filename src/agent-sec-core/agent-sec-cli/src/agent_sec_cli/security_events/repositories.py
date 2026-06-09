@@ -5,12 +5,12 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Sequence
 
 from agent_sec_cli.security_events.models import SecurityEventRecord
 from agent_sec_cli.security_events.orm_store import SqliteStore
-from agent_sec_cli.security_events.schema import SecurityEvent
+from agent_sec_cli.security_events.schema import SecurityEvent, extract_verdict
 from sqlalchemy import Select, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -34,7 +34,13 @@ class SecurityEventRepository:
     _COUNT_BY_COLUMNS = {
         "category": SecurityEventRecord.category,
         "event_type": SecurityEventRecord.event_type,
+        "result": SecurityEventRecord.result,
         "trace_id": SecurityEventRecord.trace_id,
+        "session_id": SecurityEventRecord.session_id,
+        "run_id": SecurityEventRecord.run_id,
+        "call_id": SecurityEventRecord.call_id,
+        "tool_call_id": SecurityEventRecord.tool_call_id,
+        "verdict": SecurityEventRecord.verdict,
     }
 
     def __init__(self, store: SqliteStore) -> None:
@@ -76,6 +82,7 @@ class SecurityEventRepository:
             "run_id": event.run_id,
             "call_id": event.call_id,
             "tool_call_id": event.tool_call_id,
+            "verdict": extract_verdict(event.details),
             "details": json.dumps(event.details, ensure_ascii=False),
         }
 
@@ -83,19 +90,34 @@ class SecurityEventRepository:
         self,
         event_type: str | None = None,
         category: str | None = None,
+        result: str | None = None,
         trace_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        call_id: str | None = None,
+        tool_call_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        verdict: str | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[SecurityEvent]:
-        """Query security events with optional filters."""
+        """Query security events with optional filters.
+
+        All filters, including verdict, are applied in SQL.
+        """
         conditions = self._build_filters(
             event_type=event_type,
             category=category,
+            result=result,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
+            call_id=call_id,
+            tool_call_id=tool_call_id,
             since=since,
             until=until,
+            verdict=verdict,
         )
         stmt = (
             select(SecurityEventRecord)
@@ -121,7 +143,28 @@ class SecurityEventRepository:
             event = self._record_to_event(record)
             if event is not None:
                 events.append(event)
+
         return events
+
+    def get(self, event_id: str) -> SecurityEvent | None:
+        """Return one security event by id."""
+        session_factory = self._store.session_factory()
+        if session_factory is None:
+            return None
+
+        stmt = select(SecurityEventRecord).where(
+            SecurityEventRecord.event_id == event_id
+        )
+        try:
+            with session_factory() as session:
+                record = session.execute(stmt).scalar_one_or_none()
+        except SQLAlchemyError:
+            self._store.dispose()
+            return None
+
+        if record is None:
+            return None
+        return self._record_to_event(record)
 
     def query_correlation_candidates(
         self,
@@ -203,32 +246,48 @@ class SecurityEventRepository:
         self,
         event_type: str | None = None,
         category: str | None = None,
+        result: str | None = None,
         trace_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        call_id: str | None = None,
+        tool_call_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        verdict: str | None = None,
         offset: int = 0,
     ) -> int:
-        """Count events matching the given filters."""
+        """Count events matching the given filters.
+
+        All filters, including verdict, are applied in SQL.
+        """
         conditions = self._build_filters(
             event_type=event_type,
             category=category,
+            result=result,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
+            call_id=call_id,
+            tool_call_id=tool_call_id,
             since=since,
             until=until,
+            verdict=verdict,
         )
-        if offset == 0:
-            stmt: Select[tuple[int]] = (
-                select(func.count()).select_from(SecurityEventRecord).where(*conditions)
-            )
-        else:
-            subquery = (
+
+        if offset:
+            source = (
                 select(SecurityEventRecord.event_id)
                 .where(*conditions)
-                .limit(-1)
+                .order_by(SecurityEventRecord.timestamp_epoch.desc())
                 .offset(offset)
                 .subquery()
             )
-            stmt = select(func.count()).select_from(subquery)
+            stmt: Select[tuple[int]] = select(func.count()).select_from(source)
+        else:
+            stmt = (
+                select(func.count()).select_from(SecurityEventRecord).where(*conditions)
+            )
 
         session_factory = self._store.session_factory()
         if session_factory is None:
@@ -246,38 +305,64 @@ class SecurityEventRepository:
         group_field: str,
         event_type: str | None = None,
         category: str | None = None,
+        result: str | None = None,
         trace_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        call_id: str | None = None,
+        tool_call_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        verdict: str | None = None,
         offset: int = 0,
     ) -> dict[str, int]:
-        """Count events grouped by a specific allowlisted field."""
-        column = self._COUNT_BY_COLUMNS.get(group_field)
-        if column is None:
+        """Count events grouped by a specific allowlisted field.
+
+        All filters and group fields, including verdict, are handled in SQL.
+        """
+        if group_field not in self._COUNT_BY_COLUMNS:
             raise ValueError(
                 f"Invalid group_field: {group_field!r}. "
-                "Must be one of: category, event_type, trace_id"
+                "Must be one of: call_id, category, event_type, result, "
+                "run_id, session_id, tool_call_id, trace_id, verdict"
             )
 
         conditions = self._build_filters(
             event_type=event_type,
             category=category,
+            result=result,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
+            call_id=call_id,
+            tool_call_id=tool_call_id,
             since=since,
             until=until,
+            verdict=verdict,
         )
-        if offset == 0:
-            stmt = select(column, func.count()).where(*conditions).group_by(column)
-        else:
-            subquery = (
-                select(column.label(group_field))
+
+        column = self._COUNT_BY_COLUMNS[group_field]
+        if group_field == "verdict" and verdict is None:
+            conditions = [
+                *conditions,
+                SecurityEventRecord.verdict.is_not(None),
+                SecurityEventRecord.verdict != "",
+            ]
+        if offset:
+            source = (
+                select(column.label("group_value"))
                 .where(*conditions)
-                .limit(-1)
+                .order_by(SecurityEventRecord.timestamp_epoch.desc())
                 .offset(offset)
                 .subquery()
             )
-            subquery_column = getattr(subquery.c, group_field)
-            stmt = select(subquery_column, func.count()).group_by(subquery_column)
+            stmt = (
+                select(source.c.group_value, func.count())
+                .select_from(source)
+                .group_by(source.c.group_value)
+            )
+        else:
+            stmt = select(column, func.count()).where(*conditions).group_by(column)
 
         session_factory = self._store.session_factory()
         if session_factory is None:
@@ -322,20 +407,23 @@ class SecurityEventRepository:
 
     @staticmethod
     def _timestamp_epoch(value: str) -> float:
-        """Parse an ISO timestamp as UTC when timezone information is absent."""
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
+        """Parse an ISO timestamp using local time when timezone is absent."""
+        return datetime.fromisoformat(value).timestamp()
 
     def _build_filters(
         self,
         *,
         event_type: str | None = None,
         category: str | None = None,
+        result: str | None = None,
         trace_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        call_id: str | None = None,
+        tool_call_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        verdict: str | None = None,
     ) -> list[Any]:
         """Build SQLAlchemy filter expressions from non-None filters."""
         conditions: list[Any] = []
@@ -343,8 +431,20 @@ class SecurityEventRepository:
             conditions.append(SecurityEventRecord.event_type == event_type)
         if category is not None:
             conditions.append(SecurityEventRecord.category == category)
+        if result is not None:
+            conditions.append(SecurityEventRecord.result == result)
         if trace_id is not None:
             conditions.append(SecurityEventRecord.trace_id == trace_id)
+        if session_id is not None:
+            conditions.append(SecurityEventRecord.session_id == session_id)
+        if run_id is not None:
+            conditions.append(SecurityEventRecord.run_id == run_id)
+        if call_id is not None:
+            conditions.append(SecurityEventRecord.call_id == call_id)
+        if tool_call_id is not None:
+            conditions.append(SecurityEventRecord.tool_call_id == tool_call_id)
+        if verdict is not None:
+            conditions.append(SecurityEventRecord.verdict == verdict)
         if since is not None:
             conditions.append(
                 SecurityEventRecord.timestamp_epoch >= self._timestamp_epoch(since)

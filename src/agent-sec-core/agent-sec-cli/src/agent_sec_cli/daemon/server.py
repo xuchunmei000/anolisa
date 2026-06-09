@@ -32,6 +32,9 @@ from agent_sec_cli.daemon.gateway import (
 from agent_sec_cli.daemon.handlers.prompt_scan import (
     register_prompt_scan_methods,
 )
+from agent_sec_cli.daemon.handlers.security_query import (
+    register_security_query_methods,
+)
 from agent_sec_cli.daemon.health import register_health_methods
 from agent_sec_cli.daemon.jobs.registry import register_default_jobs
 from agent_sec_cli.daemon.logging import log_daemon_event, setup_daemon_logging
@@ -69,6 +72,7 @@ def create_default_registry() -> MethodRegistry:
     register_health_methods(registry)
     register_prompt_scan_methods(registry)
     registry.register(skillfs_notify_method_spec())
+    register_security_query_methods(registry)
     return registry
 
 

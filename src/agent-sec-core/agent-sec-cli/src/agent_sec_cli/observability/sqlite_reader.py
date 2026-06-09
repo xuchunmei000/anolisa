@@ -42,19 +42,85 @@ class ObservabilityReader:
         )
         self._repository = ObservabilityEventRepository(self._store)
 
-    def list_sessions(self) -> list[SessionSummary]:
-        """Return all sessions ordered by most recent activity descending."""
-        return self._repository.list_sessions()
+    def count_sessions(
+        self,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+    ) -> int:
+        """Return the number of distinct sessions matching optional time filters."""
+        return self._repository.count_sessions(
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+        )
 
-    def list_runs(self, session_id: str) -> list[RunSummary]:
+    def count_runs(
+        self,
+        session_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+    ) -> int:
+        """Return the number of distinct runs in a session matching time filters."""
+        return self._repository.count_runs(
+            session_id,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+        )
+
+    def list_sessions(
+        self,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[SessionSummary]:
+        """Return all sessions ordered by most recent activity descending."""
+        return self._repository.list_sessions(
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_runs(
+        self,
+        session_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RunSummary]:
         """Return all runs in *session_id* ordered chronologically."""
-        return self._repository.list_runs(session_id)
+        return self._repository.list_runs(
+            session_id,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            limit=limit,
+            offset=offset,
+        )
 
     def list_events(
-        self, session_id: str, run_id: str
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ObservabilityEventRecord]:
         """Return all events for *run_id* in *session_id* ordered ASC."""
-        return self._repository.list_events(session_id, run_id)
+        return self._repository.list_events(
+            session_id,
+            run_id,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            limit=limit,
+            offset=offset,
+        )
 
     def close(self) -> None:
         """Dispose cached read-only connections."""
