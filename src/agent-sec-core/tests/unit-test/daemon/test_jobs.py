@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import sys
+import threading
 
 import pytest
 from agent_sec_cli.daemon.jobs import (
@@ -253,8 +254,64 @@ def test_prompt_model_preload_job_cancel_during_child_preload(monkeypatch):
 
     assert child_cancelled is True
     assert status["state"] == "stopped"
-    assert prompt_state.status == "downloading"
+    assert prompt_state.status == "stopped"
     assert prompt_state.loaded is False
+    assert prompt_state.last_error is None
+    assert prompt_state.last_finished_at is not None
+
+
+def test_prompt_model_preload_job_cancel_during_main_preload(monkeypatch):
+    prompt_state = PromptScanRuntimeState()
+    preload_started = threading.Event()
+    preload_finished = threading.Event()
+    release_preload = threading.Event()
+
+    async def fake_child_preload(_mode: str) -> None:
+        pass
+
+    def fake_preload(state, _mode: str, _probe_text: str) -> None:
+        state.status = "loading"
+        preload_started.set()
+        try:
+            release_preload.wait(timeout=1.0)
+        finally:
+            preload_finished.set()
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._run_preload_child_process",
+        fake_child_preload,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.jobs.prompt_preload._preload_prompt_model_sync",
+        fake_preload,
+    )
+
+    async def scenario():
+        job = PromptModelPreloadJob(prompt_state)
+        await job.start()
+        for _attempt in range(50):
+            if preload_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert preload_started.is_set()
+
+        await job.stop()
+        prompt_snapshot = prompt_state.to_dict()
+        release_preload.set()
+        for _attempt in range(50):
+            if preload_finished.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert preload_finished.is_set()
+        return job.status().to_dict(), prompt_snapshot
+
+    status, prompt_snapshot = asyncio.run(scenario())
+
+    assert status["state"] == "stopped"
+    assert prompt_snapshot["status"] == "stopped"
+    assert prompt_snapshot["loaded"] is False
+    assert prompt_snapshot["last_error"] is None
+    assert prompt_snapshot["last_finished_at"] is not None
 
 
 def test_prompt_preload_child_process_is_terminated_on_cancel(monkeypatch):
@@ -396,20 +453,24 @@ def test_prompt_model_download_sync_suppresses_warmup_output(monkeypatch, capsys
     assert captured.err == ""
 
 
-def test_prompt_model_preload_sync_suppresses_warmup_output(monkeypatch, capsys):
+def test_prompt_model_preload_sync_does_not_redirect_daemon_stdio(monkeypatch, capsys):
     prompt_state = PromptScanRuntimeState()
     calls = []
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
 
     class FakePromptScanner:
         def __init__(self, mode):
             calls.append(("init", mode.value))
 
         def warmup(self):
-            print("download progress on stdout")
-            print("download progress on stderr", file=sys.stderr)
-            calls.append(("warmup",))
+            raise AssertionError("daemon preload should not run download warmup")
 
         def scan(self, text, source=None):
+            assert sys.stdout is original_stdout
+            assert sys.stderr is original_stderr
+            print("daemon stdout remains visible")
+            print("daemon stderr remains visible", file=sys.stderr)
             calls.append(("scan", text, source))
 
     monkeypatch.setattr(
@@ -422,11 +483,10 @@ def test_prompt_model_preload_sync_suppresses_warmup_output(monkeypatch, capsys)
 
     assert calls == [
         ("init", "strict"),
-        ("warmup",),
         ("scan", "probe", "daemon-startup"),
     ]
-    assert captured.out == ""
-    assert captured.err == ""
+    assert captured.out == "daemon stdout remains visible\n"
+    assert captured.err == "daemon stderr remains visible\n"
     assert prompt_state.model == "LLM-Research/Llama-Prompt-Guard-2-86M"
     assert prompt_state.status == "loading"
 

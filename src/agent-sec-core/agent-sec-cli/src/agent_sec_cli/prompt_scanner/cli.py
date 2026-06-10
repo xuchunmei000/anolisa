@@ -8,10 +8,6 @@ from typing import Any
 import typer
 from agent_sec_cli.correlation_context import get_current_trace_context
 from agent_sec_cli.daemon.client import DaemonClient
-from agent_sec_cli.daemon.errors import (
-    DaemonClientError,
-    DaemonRuntimePathError,
-)
 from agent_sec_cli.daemon.protocol import DaemonResponse
 from agent_sec_cli.prompt_scanner.config import ScanMode
 from agent_sec_cli.prompt_scanner.result import Verdict
@@ -180,7 +176,7 @@ def scan_prompt(
     for t in texts:
         try:
             response = _call_scan_prompt_daemon(t, scan_mode.value, source)
-        except (DaemonClientError, DaemonRuntimePathError) as exc:
+        except Exception as exc:
             _print_error_json(_daemon_unavailable_message(str(exc)))
             raise typer.Exit(code=0)
 

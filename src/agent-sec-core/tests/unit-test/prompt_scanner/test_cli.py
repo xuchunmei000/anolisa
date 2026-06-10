@@ -277,6 +277,20 @@ class TestCliDaemonUnavailableHandling(unittest.TestCase):
         self.assertIn("XDG_RUNTIME_DIR is required", parsed["summary"])
         self.assertEqual(out.stderr, "")
 
+    def test_unwrapped_daemon_call_error_returns_error_json(self) -> None:
+        with patch(
+            "agent_sec_cli.prompt_scanner.cli._call_scan_prompt_daemon",
+            side_effect=ConnectionResetError("connection reset by peer"),
+        ):
+            out = runner.invoke(scanner_app, ["--text", "hello"])
+
+        self.assertEqual(out.exit_code, 0)
+        parsed = json.loads(out.stdout)
+        self.assertEqual(parsed["verdict"], "error")
+        self.assertIn("daemon is unavailable", parsed["summary"])
+        self.assertIn("connection reset by peer", parsed["summary"])
+        self.assertEqual(out.stderr, "")
+
     def test_daemon_unavailable_response_returns_error_json(self) -> None:
         daemon_response = DaemonResponse(
             id="req-prompt",

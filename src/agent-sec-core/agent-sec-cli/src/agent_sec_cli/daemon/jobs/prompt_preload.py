@@ -90,6 +90,16 @@ class PromptModelPreloadJob(BackgroundJob):
                 self._probe_text,
             )
         except asyncio.CancelledError:
+            finished_at = utc_now()
+            self._last_error = None
+            self._state = "stopped"
+            _update_prompt_state(
+                self._prompt_state,
+                status="stopped",
+                loaded=False,
+                last_error=None,
+                last_finished_at=finished_at,
+            )
             raise
         except Exception as exc:
             finished_at = utc_now()
@@ -210,7 +220,13 @@ def _preload_prompt_model_sync(
     mode: str,
     probe_text: str,
 ) -> None:
-    """Download, load, and probe the prompt model in a worker thread."""
+    """Load and probe the prompt model in a worker thread.
+
+    Downloads are handled by the child process before this function runs.
+    Avoid redirecting sys.stdout/sys.stderr here: those are process-global
+    objects, so changing them in this worker thread could hide unrelated
+    daemon output from other threads.
+    """
     from agent_sec_cli.prompt_scanner.config import (  # noqa: PLC0415 - lazy import: daemon preload only
         ScanMode,
         get_config,
@@ -224,13 +240,12 @@ def _preload_prompt_model_sync(
     _update_prompt_state(prompt_state, model=config.model_name)
 
     scanner = PromptScanner(mode=scan_mode)
-    _warmup_silently(scanner)
     _update_prompt_state(prompt_state, status="loading")
     scanner.scan(probe_text, source="daemon-startup")
 
 
 def _warmup_silently(scanner: Any) -> None:
-    """Run daemon-owned warmup without writing download progress to stdio."""
+    """Run child-process warmup without writing download progress to stdio."""
     with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(
         devnull
     ), contextlib.redirect_stderr(devnull):
