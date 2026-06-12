@@ -69,9 +69,9 @@ SkillFS 预期处理：
 
 Skill Ledger 不提供面向用户或 SkillFS 的 `resolve` CLI。activation refresh 是 Skill Ledger daemon 的内部职责；daemon 内部调用 resolver 后，同步写入 `activation.json` 与 xattr。SkillFS 只依赖 Runtime Activation 合同中的 `schemaVersion` 和 `target`，不得依赖 resolver 的内部返回值。
 
-## 变更通知接口
+## SkillFS 变更通知接口
 
-本次 Skill Ledger 实现只落地内部 resolver 与 Runtime Activation 合同，不实现 SkillFS 联调。后续 daemon 模式中，SkillFS 发现 source/current workspace 写变化后，应通过现有 `agent-sec-daemon` 协议通知 Skill Ledger daemon。
+SkillFS 发现 source/current workspace 写变化后，通过现有 `agent-sec-daemon` 协议通知 Skill Ledger daemon。本接口已经由 Skill Ledger 侧实现；SkillFS 侧只需要按该协议发送事件。
 
 传输形式固定为当前 `agent-sec-daemon` 机制：
 
@@ -81,7 +81,7 @@ Skill Ledger 不提供面向用户或 SkillFS 的 `resolve` CLI。activation ref
 - request/response 外层遵循现有 daemon protocol：`id`、`method`、`params`、`trace_context`、`timeout_ms`。
 - method 必须注册到 daemon allowlist；未注册 method 会返回 structured error。
 
-推荐 method：
+method 固定为：
 
 ```text
 skill_ledger.skillfs_notify_change
@@ -122,8 +122,8 @@ skill_ledger.skillfs_notify_change
 | `schemaVersion` | number | `1` | 当前固定为 `1` |
 | `skillDir` | string | 绝对路径 | source/current workspace 中的 skill 根目录 |
 | `skillName` | string | 非空字符串 | skill 名称；应与 `skillDir` basename 一致 |
-| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `truncate` / `chmod` / `chown` / `unknown` | SkillFS 观察到的文件系统变化类型 |
-| `paths` | string[] | 相对 `skillDir` 的路径数组，可为空 | 触发变化的相对路径；不得包含 `.skill-meta/**` |
+| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` | SkillFS 观察到的文件系统变化类型 |
+| `paths` | string[] | 相对 `skillDir` 的路径数组，可为空；不得是绝对路径，不得包含 `..` | 触发变化的相对路径 |
 
 响应示例：
 
@@ -133,7 +133,10 @@ skill_ledger.skillfs_notify_change
   "ok": true,
   "data": {
     "schemaVersion": 1,
-    "accepted": true
+    "accepted": true,
+    "ignored": false,
+    "queued": true,
+    "coalesced": false
   },
   "stdout": "",
   "stderr": "",
@@ -148,6 +151,9 @@ skill_ledger.skillfs_notify_change
 | `ok` | boolean | `true` / `false` | daemon 是否成功处理该请求 |
 | `data.schemaVersion` | number | `1` | 当前固定为 `1` |
 | `data.accepted` | boolean | `true` / `false` | 事件是否被接收或入队 |
+| `data.ignored` | boolean | `true` / `false` | 是否因仅包含 `.skill-meta/**` 路径而忽略 |
+| `data.queued` | boolean | `true` / `false` | 是否进入后台 activation job 队列；`ignored=true` 时不存在或为 `false` |
+| `data.coalesced` | boolean | `true` / `false` | 是否与同一 skill 的待处理事件合并 |
 | `exit_code` | number | `0` 表示请求成功 | 复用现有 daemon response 语义 |
 | `error.code` | string | 现有 daemon error code | `ok=false` 时返回 |
 
@@ -155,15 +161,16 @@ skill_ledger.skillfs_notify_change
 
 - 通知表示“某个 skill 的 source workspace 可能已变化”，不是安全结论。
 - 通知成功只表示 daemon 已接收事件，不表示 scan 已完成，也不表示 activation 已刷新。
-- `.skill-meta/**` 路径变化不应触发通知，避免 Ledger 写 metadata 时形成循环。
+- `.skill-meta/**` only 事件会返回 `accepted=true, ignored=true`，不触发扫描，避免 Ledger 写 metadata 时形成循环。SkillFS 也可以选择不发送这类事件。
 - 事件可以重复、乱序或合并；daemon 必须按 skill 维度 debounce，并以当前磁盘状态重新计算。
 
-Skill Ledger daemon 侧应执行的逻辑：
+Skill Ledger daemon 侧执行的逻辑：
 
-- 接收事件并按 skill debounce。
-- 对 source/current workspace 执行 scan 或必要的状态刷新，再调用内部 resolver。
-- 写入新的 `.skill-meta/activation.json`。
-- 启动或重启时 reconcile managed skill dirs，补处理 daemon 下线期间错过的变化。
+- 接收事件并按 `skillDir` debounce，默认 debounce 窗口为 500ms。
+- 对 source/current workspace 执行 `scan`。如果扫描为 `noop`，仍继续刷新 activation。
+- 如果 scan 失败，仍尝试刷新 activation，以便 `drifted`、`tampered` 等状态可以回退到历史 pass snapshot。
+- 调用内部 resolver，写入新的 `.skill-meta/activation.json` 与 xattr。
+- 启动或重启时 reconcile `managedSkillDirs`，补处理 daemon 下线期间错过的变化。
 
 `check` 保持只读状态检查，不作为版本或 snapshot 创建入口。
 
@@ -194,8 +201,8 @@ SkillFS 应维护 append-only JSONL 事件日志，供 daemon reconcile、观测
 | `time` | string | RFC 3339 UTC timestamp | SkillFS 记录事件的时间 |
 | `skillDir` | string | 绝对路径 | source/current workspace 中的 skill 根目录 |
 | `skillName` | string | 非空字符串 | skill 名称；应与 `skillDir` basename 一致 |
-| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `truncate` / `chmod` / `chown` / `unknown` | SkillFS 观察到的文件系统变化类型 |
-| `paths` | string[] | 相对 `skillDir` 的路径数组，可为空 | 触发变化的相对路径；不得包含 `.skill-meta/**` |
+| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` | SkillFS 观察到的文件系统变化类型 |
+| `paths` | string[] | 相对 `skillDir` 的路径数组，可为空；不得是绝对路径，不得包含 `..` | 触发变化的相对路径 |
 
 日志要求：
 

@@ -175,6 +175,13 @@ class JobManager:
         """Register a background job before daemon startup."""
         self._jobs.append(job)
 
+    def get(self, name: str) -> BackgroundJob | None:
+        """Return a registered job by stable name."""
+        for job in self._jobs:
+            if job.name == name:
+                return job
+        return None
+
     async def start_all(self) -> None:
         """Start all registered jobs."""
         for job in self._jobs:

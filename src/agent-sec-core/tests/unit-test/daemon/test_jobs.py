@@ -98,8 +98,13 @@ def test_register_default_jobs_respects_prompt_preload_env(monkeypatch):
     monkeypatch.setenv("AGENT_SEC_DAEMON_PROMPT_PRELOAD", "1")
     register_default_jobs(enabled_manager, prompt_state)
 
-    assert disabled_manager.status() == []
-    assert [job["name"] for job in enabled_manager.status()] == ["prompt-model-preload"]
+    assert [job["name"] for job in disabled_manager.status()] == [
+        "skill-ledger-activation"
+    ]
+    assert [job["name"] for job in enabled_manager.status()] == [
+        "skill-ledger-activation",
+        "prompt-model-preload",
+    ]
 
 
 def test_prompt_model_preload_job_updates_runtime_state(monkeypatch):

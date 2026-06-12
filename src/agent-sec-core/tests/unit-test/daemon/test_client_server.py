@@ -7,6 +7,7 @@ import logging
 import os
 import socket
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from agent_sec_cli.daemon.errors import (
     DaemonProtocolError,
     DaemonRuntimePathError,
 )
+from agent_sec_cli.daemon.health import build_health_snapshot
 from agent_sec_cli.daemon.protocol import (
     DaemonRequest,
     DaemonResponse,
@@ -31,8 +33,13 @@ from agent_sec_cli.daemon.runtime import DaemonRuntime
 from agent_sec_cli.daemon.server import (
     DaemonServer,
     _log_request_completion,
+    create_default_registry,
     prepare_socket_path,
 )
+
+
+def _matching_modules(prefixes: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted(name for name in sys.modules if name.startswith(prefixes)))
 
 
 def test_client_uses_env_socket_override(monkeypatch, tmp_path: Path):
@@ -572,6 +579,31 @@ def test_prepare_socket_path_rejects_symlink_runtime_directory(tmp_path: Path):
         assert "must not be a symlink" in exc.message
     else:
         raise AssertionError("expected symlink runtime directory to fail")
+
+
+def test_health_does_not_import_heavy_modules(tmp_path: Path):
+    heavy_prefixes = (
+        "agent_sec_cli.code_scanner",
+        "agent_sec_cli.pii_checker",
+        "agent_sec_cli.prompt_scanner",
+        "agent_sec_cli.security_middleware",
+        "agent_sec_cli.skill_ledger",
+    )
+    before = _matching_modules(heavy_prefixes)
+
+    snapshot = build_health_snapshot(
+        DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    )
+    registry = create_default_registry()
+
+    assert snapshot["status"] == "ok"
+    assert snapshot["prompt_scan"]["status"] == "pending"
+    assert registry.methods() == (
+        "daemon.health",
+        "scan-prompt",
+        "skill_ledger.skillfs_notify_change",
+    )
+    assert _matching_modules(heavy_prefixes) == before
 
 
 def test_completion_log_is_emitted_when_inflight_request_is_cancelled(

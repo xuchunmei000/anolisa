@@ -46,6 +46,9 @@ from agent_sec_cli.daemon.runtime import (
     lock_path_for_socket,
     resolve_socket_path,
 )
+from agent_sec_cli.daemon.skill_ledger_activation import (
+    skillfs_notify_method_spec,
+)
 
 LOGGER = logging.getLogger("agent-sec-core.daemon")
 DEFAULT_MAX_CONNECTIONS = 64
@@ -59,6 +62,7 @@ def create_default_registry() -> MethodRegistry:
     registry = MethodRegistry()
     register_health_methods(registry)
     register_prompt_scan_methods(registry)
+    registry.register(skillfs_notify_method_spec())
     return registry
 
 

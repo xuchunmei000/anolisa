@@ -64,7 +64,8 @@ def test_daemon_health_over_unix_socket(
         assert response["data"]["socket"] == str(socket_path)
         assert response["data"]["prompt_scan"]["status"] == "pending"
         assert response["data"]["prompt_scan"]["loaded"] is False
-        assert response["data"]["jobs"] == []
+        jobs = {job["name"]: job for job in response["data"]["jobs"]}
+        assert jobs["skill-ledger-activation"]["state"] == "running"
         assert "inflight" in response["data"]["queues"]
         assert "queued" in response["data"]["queues"]
         assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
@@ -232,6 +233,44 @@ def test_daemon_sigterm_graceful_shutdown(
     assert not socket_path.exists()
 
 
+def test_daemon_skillfs_notify_refreshes_skill_ledger_activation(
+    daemon_command: list[str], tmp_path: Path
+) -> None:
+    socket_path = tmp_path / "runtime" / "daemon.sock"
+    skill_dir = _make_skill(tmp_path / "skills", "weather")
+    process = _start_daemon(daemon_command, socket_path, tmp_path)
+
+    try:
+        response = _call_daemon(
+            socket_path,
+            {
+                "id": "e2e-skillfs-notify",
+                "method": "skill_ledger.skillfs_notify_change",
+                "params": {
+                    "schemaVersion": 1,
+                    "skillDir": str(skill_dir),
+                    "skillName": "weather",
+                    "eventKind": "write",
+                    "paths": ["SKILL.md"],
+                },
+            },
+        )
+        activation = _wait_for_activation(skill_dir, process)
+    finally:
+        output = _stop_daemon(process)
+
+    assert response["ok"] is True
+    assert response["data"]["accepted"] is True
+    assert activation == {
+        "schemaVersion": 1,
+        "target": ".skill-meta/versions/v000001.snapshot",
+    }
+    assert output.returncode == 0
+    assert _has_request_log(
+        output, "e2e-skillfs-notify", "skill_ledger.skillfs_notify_change"
+    )
+
+
 def _start_daemon(
     daemon_command: list[str],
     socket_path: Path,
@@ -246,9 +285,12 @@ def _start_daemon(
     env.pop("AGENT_SEC_DAEMON_SOCKET", None)
     env["AGENT_SEC_DATA_DIR"] = str(tmp_path / "data")
     env["AGENT_SEC_DAEMON_PROMPT_PRELOAD"] = "0"
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg_config")
+    env["XDG_DATA_HOME"] = str(tmp_path / "xdg_data")
     env["PYTHONUNBUFFERED"] = "1"
     if xdg_runtime_dir is not None:
         env["XDG_RUNTIME_DIR"] = str(xdg_runtime_dir)
+    _write_skill_ledger_config(tmp_path)
 
     command = [*daemon_command, "serve"]
     if not use_default_socket:
@@ -266,6 +308,42 @@ def _start_daemon(
     if wait_for_health:
         _wait_for_health(socket_path, process)
     return process
+
+
+def _write_skill_ledger_config(tmp_path: Path) -> None:
+    config_dir = tmp_path / "xdg_config" / "agent-sec" / "skill-ledger"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "enableDefaultSkillDirs": False,
+                "managedSkillDirs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _make_skill(parent: Path, name: str) -> Path:
+    skill_dir = parent / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Test skill\n---\n# {name}\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "run.sh").write_text("echo ok\n", encoding="utf-8")
+    return skill_dir
+
+
+def _wait_for_activation(skill_dir: Path, process: subprocess.Popen[str]) -> dict:
+    activation_path = skill_dir / ".skill-meta" / "activation.json"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        _assert_process_running(process)
+        if activation_path.is_file():
+            return json.loads(activation_path.read_text(encoding="utf-8"))
+        time.sleep(0.05)
+    raise AssertionError(f"activation was not written: {activation_path}")
 
 
 def _stop_daemon(

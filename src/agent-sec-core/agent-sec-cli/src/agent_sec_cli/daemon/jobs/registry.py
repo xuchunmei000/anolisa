@@ -7,6 +7,9 @@ from agent_sec_cli.daemon.jobs.prompt_preload import (
     PromptModelPreloadJob,
     prompt_preload_enabled,
 )
+from agent_sec_cli.daemon.skill_ledger_activation import (
+    SkillLedgerActivationJob,
+)
 
 
 def register_default_jobs(
@@ -18,5 +21,6 @@ def register_default_jobs(
     Concrete jobs live in this package as separate modules. Keep this file as
     the central startup registry so daemon startup order stays explicit.
     """
+    job_manager.register(SkillLedgerActivationJob())
     if prompt_scan_state is not None and prompt_preload_enabled():
         job_manager.register(PromptModelPreloadJob(prompt_scan_state))
