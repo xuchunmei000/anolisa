@@ -8,6 +8,7 @@ These tests protect the configuration-layer invariants:
 5. Compact — specific paths subsumed by a glob are pruned.
 """
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -16,6 +17,8 @@ from unittest.mock import patch
 
 from agent_sec_cli.skill_ledger.config import (
     _DEFAULT_CONFIG,
+    ACTIVATION_POLICY_LATEST_SCANNED,
+    ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_SKILL_DIRS,
     _compact_skill_dirs,
     _deep_merge_config,
@@ -24,8 +27,10 @@ from agent_sec_cli.skill_ledger.config import (
     is_covered,
     load_config,
     remember_skill_dir,
+    resolve_activation_policy,
     resolve_skill_dirs,
 )
+from agent_sec_cli.skill_ledger.errors import ConfigError
 
 
 class TestDefaultConfig(unittest.TestCase):
@@ -42,6 +47,14 @@ class TestDefaultConfig(unittest.TestCase):
 
     def test_default_signing_backend(self):
         self.assertEqual(_DEFAULT_CONFIG["signingBackend"], "ed25519")
+
+    def test_default_activation_policy(self):
+        self.assertEqual(
+            _DEFAULT_CONFIG["activationPolicy"], ACTIVATION_POLICY_PASS_ONLY
+        )
+        self.assertEqual(
+            resolve_activation_policy(_DEFAULT_CONFIG), ACTIVATION_POLICY_PASS_ONLY
+        )
 
     def test_default_scanners_present(self):
         scanners = {entry["name"]: entry for entry in _DEFAULT_CONFIG["scanners"]}
@@ -146,6 +159,42 @@ class TestConfigMerge(unittest.TestCase):
         user = {"otherList": [3]}
         merged = _deep_merge_config(defaults, user)
         self.assertEqual(merged["otherList"], [3])
+
+    def test_resolve_activation_policy_accepts_latest_scanned(self):
+        self.assertEqual(
+            resolve_activation_policy(
+                {"activationPolicy": ACTIVATION_POLICY_LATEST_SCANNED}
+            ),
+            ACTIVATION_POLICY_LATEST_SCANNED,
+        )
+
+    def test_resolve_activation_policy_rejects_unknown_policy(self):
+        with self.assertRaisesRegex(ConfigError, "activationPolicy"):
+            resolve_activation_policy({"activationPolicy": "unknown"})
+
+    def test_resolve_activation_policy_rejects_non_string_policy(self):
+        with self.assertRaisesRegex(ConfigError, "activationPolicy"):
+            resolve_activation_policy({"activationPolicy": ["pass_only"]})
+
+    def test_load_config_preserves_activation_policy(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        try:
+            cfg_path = cfg_dir / "config.json"
+            cfg_path.write_text(
+                json.dumps({"activationPolicy": ACTIVATION_POLICY_LATEST_SCANNED}),
+                encoding="utf-8",
+            )
+            with patch(
+                "agent_sec_cli.skill_ledger.config.get_config_dir",
+                return_value=cfg_dir,
+            ):
+                cfg = load_config()
+            self.assertEqual(
+                resolve_activation_policy(cfg),
+                ACTIVATION_POLICY_LATEST_SCANNED,
+            )
+        finally:
+            shutil.rmtree(cfg_dir)
 
 
 class TestResolveSkillDirs(unittest.TestCase):

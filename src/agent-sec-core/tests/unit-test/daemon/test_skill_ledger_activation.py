@@ -288,8 +288,15 @@ def test_process_skill_change_resolves_activation_after_scan_error(
         events.append(("scan", path, received_backend))
         raise RuntimeError("scanner failed")
 
-    def fake_resolve(path: str, received_backend: object) -> dict[str, Any]:
-        events.append(("resolve", path, received_backend))
+    def fake_policy() -> str:
+        return "pass_only"
+
+    def fake_resolve(
+        path: str,
+        received_backend: object,
+        policy: str,
+    ) -> dict[str, Any]:
+        events.append(("resolve", path, received_backend, policy))
         return {"target": None}
 
     monkeypatch.setattr(
@@ -303,6 +310,10 @@ def test_process_skill_change_resolves_activation_after_scan_error(
     monkeypatch.setattr(
         "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation",
         fake_resolve,
+    )
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_activation_policy",
+        fake_policy,
     )
 
     result = process_skill_change(
@@ -319,7 +330,7 @@ def test_process_skill_change_resolves_activation_after_scan_error(
     assert result["activation"] == {"target": None}
     assert events == [
         ("scan", str(skill_dir.resolve()), backend),
-        ("resolve", str(skill_dir.resolve()), backend),
+        ("resolve", str(skill_dir.resolve()), backend, "pass_only"),
     ]
 
 

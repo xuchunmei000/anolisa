@@ -221,11 +221,23 @@ SkillFS 应维护 append-only JSONL 事件日志，供 daemon reconcile、观测
 
 ## 策略
 
-当前默认策略为 `pass_only`：
+activation policy 是 Skill Ledger 配置项，SkillFS 不感知策略，只消费最终
+`activation.json.target` 或同语义 xattr。当前支持全局策略：
 
-- 只激活签名有效、manifest hash 有效、snapshot 完整、`scanStatus=pass` 的版本。
-- 当前 source 处于 `drifted`、`warn`、`deny`、`tampered` 或 `none` 时，不激活 source。
-- 若存在最近 pass snapshot，则 activation 指向该 snapshot。
-- 若不存在可信 pass snapshot，则 activation target 为 `null`。
+```json
+{
+  "activationPolicy": "pass_only"
+}
+```
 
-后续如果引入 warn/deny 的可配置策略，策略仍由 Skill Ledger 计算；SkillFS 的消费合同不变。
+允许值：
+
+| policy | 激活规则 |
+|--------|----------|
+| `pass_only` | 只激活签名有效、manifest hash 有效、snapshot 完整、`scanStatus=pass` 的最新 snapshot。 |
+| `latest_scanned` | 激活签名有效、manifest hash 有效、snapshot 完整、且 `scanStatus in {"pass","warn","deny"}` 的最新 snapshot。 |
+
+两种策略都不会激活 source/current 工作区。`latest_scanned` 中的 “latest”
+指最新可校验的 signed snapshot，不是当前未扫描的 source 文件树。`scanStatus=none`
+表示尚无扫描结论，不会被任一策略激活。若没有符合策略的 snapshot，则 activation
+target 为 `null`。

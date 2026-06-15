@@ -257,6 +257,7 @@ def parse_skillfs_change(params: dict[str, Any]) -> SkillFsChange:
 def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     """Run scan and activation resolution for a debounced SkillFS change."""
     backend = _ensure_default_backend()
+    policy = _resolve_activation_policy()
     scan_result: dict[str, Any] | None = None
     scan_error: str | None = None
     try:
@@ -264,7 +265,7 @@ def process_skill_change(change: SkillFsChange) -> dict[str, Any]:
     except Exception as exc:
         scan_error = str(exc)
 
-    activation_result = _resolve_activation(str(change.skill_dir), backend)
+    activation_result = _resolve_activation(str(change.skill_dir), backend, policy)
     result: dict[str, Any] = {
         "status": "processed" if scan_error is None else "error",
         "skill": change.to_dict(),
@@ -332,12 +333,20 @@ def _scan_skill(skill_dir: str, backend: Any) -> dict[str, Any]:
     return scan_skill(skill_dir, backend, force=False)
 
 
-def _resolve_activation(skill_dir: str, backend: Any) -> dict[str, Any]:
+def _resolve_activation(skill_dir: str, backend: Any, policy: str) -> dict[str, Any]:
     from agent_sec_cli.skill_ledger.core.resolver import (  # noqa: PLC0415
         resolve_activation,
     )
 
-    return resolve_activation(skill_dir, backend)
+    return resolve_activation(skill_dir, backend, policy=policy)
+
+
+def _resolve_activation_policy() -> str:
+    from agent_sec_cli.skill_ledger.config import (  # noqa: PLC0415
+        resolve_activation_policy,
+    )
+
+    return resolve_activation_policy()
 
 
 def _resolve_managed_skill_dirs() -> list[Path]:

@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 _SKILL_MANIFEST = "SKILL.md"
 _DEPRECATED_SKILL_DIRS_KEY = "skillDirs"
+ACTIVATION_POLICY_PASS_ONLY = "pass_only"
+ACTIVATION_POLICY_LATEST_SCANNED = "latest_scanned"
+DEFAULT_ACTIVATION_POLICY = ACTIVATION_POLICY_PASS_ONLY
+ACTIVATION_POLICIES = frozenset(
+    {ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED}
+)
 DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
@@ -29,6 +35,7 @@ _IGNORED_RECURSIVE_DIRS = frozenset(
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "signingBackend": "ed25519",
+    "activationPolicy": DEFAULT_ACTIVATION_POLICY,
     "enableDefaultSkillDirs": True,
     "managedSkillDirs": [],
     # ── Scanner / parser registry (see design doc §2) ──
@@ -148,6 +155,17 @@ def load_config() -> dict[str, Any]:
         return _deep_merge_config(_DEFAULT_CONFIG, cfg)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"Invalid JSON in {path}: {exc}") from exc
+
+
+def resolve_activation_policy(config: dict[str, Any] | None = None) -> str:
+    """Return the configured activation policy."""
+    if config is None:
+        config = load_config()
+    policy = config.get("activationPolicy", DEFAULT_ACTIVATION_POLICY)
+    if not isinstance(policy, str) or policy not in ACTIVATION_POLICIES:
+        allowed = ", ".join(sorted(ACTIVATION_POLICIES))
+        raise ConfigError(f"activationPolicy must be one of: {allowed}")
+    return policy
 
 
 def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:

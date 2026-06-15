@@ -15,6 +15,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.skill_ledger.config import (
+    ACTIVATION_POLICIES,
+    ACTIVATION_POLICY_LATEST_SCANNED,
+    ACTIVATION_POLICY_PASS_ONLY,
+    DEFAULT_ACTIVATION_POLICY,
+)
 from agent_sec_cli.skill_ledger.core.checker import check
 from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_snapshot_file_hashes,
@@ -38,7 +44,11 @@ from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 SCHEMA_VERSION = 1
 ACTIVATION_JSON = "activation.json"
 ACTIVATION_XATTR = "user.agent_sec.skill_ledger.activation"
-DEFAULT_ACTIVATION_POLICY = "pass_only"
+
+_POLICY_ALLOWED_SCAN_STATUSES = {
+    ACTIVATION_POLICY_PASS_ONLY: frozenset({"pass"}),
+    ACTIVATION_POLICY_LATEST_SCANNED: frozenset({"pass", "warn", "deny"}),
+}
 
 
 def activation_json_path(skill_dir: str | Path) -> Path:
@@ -65,19 +75,23 @@ def resolve_activation(
 ) -> dict[str, Any]:
     """Resolve and optionally persist the runtime activation target.
 
-    The default ``pass_only`` policy activates only signed ``scanStatus=pass``
-    versions with intact snapshots. Current source workspace changes never
-    become runtime-readable until scan/certify creates a passing snapshot.
+    ``pass_only`` activates only signed ``scanStatus=pass`` versions.
+    ``latest_scanned`` activates the latest signed scanned snapshot, including
+    ``pass``, ``warn``, or ``deny``. Current source workspace changes never
+    become runtime-readable until scan/certify creates a snapshot.
     """
-    if policy != DEFAULT_ACTIVATION_POLICY:
-        raise ValueError(f"unsupported activation policy: {policy}")
+    if not isinstance(policy, str) or policy not in ACTIVATION_POLICIES:
+        allowed = ", ".join(sorted(ACTIVATION_POLICIES))
+        raise ValueError(
+            f"unsupported activation policy: {policy}; expected one of: {allowed}"
+        )
 
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
     status_result = check(skill_dir, backend)
     status = status_result.get("status", "unknown")
 
-    candidate = find_latest_pass_snapshot(skill_dir, backend)
+    candidate = find_latest_activation_snapshot(skill_dir, backend, policy=policy)
     if candidate is None:
         target = None
         active_version = None
@@ -110,6 +124,28 @@ def find_latest_pass_snapshot(
     backend: SigningBackend,
 ) -> tuple[str, str] | None:
     """Return ``(version_id, target)`` for the newest valid pass snapshot."""
+    return find_latest_activation_snapshot(
+        skill_dir,
+        backend,
+        policy=ACTIVATION_POLICY_PASS_ONLY,
+    )
+
+
+def find_latest_activation_snapshot(
+    skill_dir: str | Path,
+    backend: SigningBackend,
+    *,
+    policy: str,
+) -> tuple[str, str] | None:
+    """Return ``(version_id, target)`` for the newest snapshot allowed by policy."""
+    allowed_statuses = (
+        _POLICY_ALLOWED_SCAN_STATUSES.get(policy) if isinstance(policy, str) else None
+    )
+    if allowed_statuses is None:
+        allowed = ", ".join(sorted(_POLICY_ALLOWED_SCAN_STATUSES))
+        raise ValueError(
+            f"unsupported activation policy: {policy}; expected one of: {allowed}"
+        )
     for version_id in reversed(list_version_ids(skill_dir)):
         try:
             manifest = load_version_manifest(skill_dir, version_id)
@@ -119,7 +155,11 @@ def find_latest_pass_snapshot(
             continue
         if manifest.versionId != version_id:
             continue
-        if not _is_signed_pass_manifest(manifest, backend):
+        if not _is_signed_manifest_with_allowed_status(
+            manifest,
+            backend,
+            allowed_statuses,
+        ):
             continue
         if not _snapshot_matches_manifest(skill_dir, version_id, manifest):
             continue
@@ -163,11 +203,12 @@ def write_activation_xattr(
     return _activation_xattr_status(written=True, available=True)
 
 
-def _is_signed_pass_manifest(
+def _is_signed_manifest_with_allowed_status(
     manifest: SignedManifest,
     backend: SigningBackend,
+    allowed_statuses: frozenset[str],
 ) -> bool:
-    if manifest.scanStatus != "pass":
+    if manifest.scanStatus not in allowed_statuses:
         return False
     valid, _ = verify_manifest_integrity(manifest, backend)
     return valid
