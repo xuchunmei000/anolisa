@@ -161,6 +161,108 @@ export async function callAgentSecCli(
 
 export type OpenClawObservabilityRecord = Record<string, unknown>;
 
+const OBSERVABILITY_SENSITIVE_KEYS = new Set([
+  "prompt",
+  "user_input",
+  "system_prompt",
+  "messages",
+  "response",
+  "parameters",
+  "result",
+  "error",
+  "tool_calls",
+]);
+const DROP = Symbol("drop-sensitive-observability-field");
+
+async function redactTextForObservability(text: string): Promise<string | undefined> {
+  const result = await callAgentSecCli(
+    [
+      "scan-pii",
+      "--stdin",
+      "--format",
+      "json",
+      "--redact-output",
+      "--source",
+      "observability",
+    ],
+    { stdin: text },
+  );
+  if (result.exitCode !== 0) {
+    return undefined;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as { redacted_text?: unknown };
+    return typeof data.redacted_text === "string" ? data.redacted_text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function redactSensitiveValue(value: unknown): Promise<unknown | typeof DROP> {
+  if (typeof value === "string") {
+    const redacted = await redactTextForObservability(value);
+    return redacted === undefined ? DROP : redacted;
+  }
+
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    serialized = String(value);
+  }
+  const redacted = await redactTextForObservability(serialized);
+  if (redacted === undefined) {
+    return DROP;
+  }
+  try {
+    return JSON.parse(redacted);
+  } catch {
+    return redacted;
+  }
+}
+
+async function redactObservabilityValue(value: unknown): Promise<unknown | typeof DROP> {
+  if (Array.isArray(value)) {
+    const redactedItems = await Promise.all(value.map((item) => redactObservabilityValue(item)));
+    return redactedItems.filter((item) => item !== DROP);
+  }
+  if (value && typeof value === "object") {
+    const entries = await Promise.all(
+      Object.entries(value as Record<string, unknown>).map(async ([key, item]) => {
+        const safeItem = OBSERVABILITY_SENSITIVE_KEYS.has(key)
+          ? await redactSensitiveValue(item)
+          : await redactObservabilityValue(item);
+        return [key, safeItem] as const;
+      }),
+    );
+    const redacted: Record<string, unknown> = {};
+    for (const [key, item] of entries) {
+      if (item !== DROP) {
+        redacted[key] = item;
+      }
+    }
+    return redacted;
+  }
+  return value;
+}
+
+async function redactObservabilityRecord(
+  event: OpenClawObservabilityRecord,
+): Promise<OpenClawObservabilityRecord> {
+  const metrics = event.metrics;
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
+    return event;
+  }
+  const safeMetrics = await redactObservabilityValue(metrics);
+  return {
+    ...event,
+    metrics:
+      safeMetrics && typeof safeMetrics === "object" && !Array.isArray(safeMetrics)
+        ? (safeMetrics as Record<string, unknown>)
+        : {},
+  };
+}
+
 /**
  * Emit one OpenClaw observability record to agent-sec-cli via stdin.
  * Logging is best-effort: callers must not use failures to alter OpenClaw behavior.
@@ -168,10 +270,11 @@ export type OpenClawObservabilityRecord = Record<string, unknown>;
 export async function recordOpenClawObservability(
   event: OpenClawObservabilityRecord,
 ): Promise<CliResult> {
+  const safeEvent = await redactObservabilityRecord(event);
   return callAgentSecCli(
     ["observability", "record", "--format", "json", "--stdin"],
     {
-      stdin: JSON.stringify(event),
+      stdin: JSON.stringify(safeEvent),
     },
   );
 }

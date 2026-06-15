@@ -118,11 +118,28 @@ function beforeToolCallEvent() {
 
 let capturedArgs: string[] | undefined;
 let capturedStdin: string | undefined;
+let capturedRecords: { args: string[]; stdin: string | undefined }[] = [];
 
-function mockCli(result: CliResult = { exitCode: 0, stdout: "", stderr: "" }) {
+function mockCli(
+  result: CliResult = { exitCode: 0, stdout: "", stderr: "" },
+  redact: (text: string) => string | undefined = (text) => text,
+) {
   _setCliMock(async (args, opts) => {
+    const offset = args[0] === "--trace-context" ? 2 : 0;
+    if (args[offset] === "scan-pii") {
+      const redactedText = redact(opts.stdin ?? "");
+      if (redactedText === undefined) {
+        return { exitCode: 2, stdout: "", stderr: "redaction failed" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ verdict: "pass", findings: [], redacted_text: redactedText }),
+        stderr: "",
+      };
+    }
     capturedArgs = args;
     capturedStdin = opts.stdin;
+    capturedRecords.push({ args, stdin: opts.stdin });
     return result;
   });
 }
@@ -144,6 +161,7 @@ describe("observability", () => {
   beforeEach(() => {
     capturedArgs = undefined;
     capturedStdin = undefined;
+    capturedRecords = [];
   });
 
   afterEach(() => {
@@ -161,7 +179,7 @@ describe("observability", () => {
     assert.equal(hooks.find((hook) => hook.hookName === "llm_input")?.priority, 1000);
   });
 
-  it("emits the expected CLI payload for before_tool_call", () => {
+  it("emits the expected CLI payload for before_tool_call", async () => {
     mockCli();
     const { api, hooks } = createMockApi();
     observability.register(api);
@@ -175,6 +193,7 @@ describe("observability", () => {
     });
 
     assert.equal(result, undefined);
+    await flushObservabilityWork();
     assert.deepEqual(capturedArgs, ["observability", "record", "--format", "json", "--stdin"]);
     assert.ok(capturedStdin);
     const payload = JSON.parse(capturedStdin);
@@ -189,6 +208,50 @@ describe("observability", () => {
       tool_name: "exec",
       parameters: beforeToolCallEvent().params,
     });
+  });
+
+  it("redacts sensitive observability payload before record", async () => {
+    mockCli(
+      { exitCode: 0, stdout: "", stderr: "" },
+      (text) => text.replace("sk-testsecret1234567890", "sk-t...[REDACTED]...7890"),
+    );
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    hook.handler(beforeToolCallEvent(), {
+      sessionId: "session-001",
+      sessionKey: "session-key-001",
+      runId: "run-ctx",
+    });
+    await flushObservabilityWork();
+
+    assert.ok(capturedStdin);
+    const payloadText = capturedStdin;
+    const payload = JSON.parse(payloadText);
+    assert.equal(payload.metrics.parameters.command.includes("sk-testsecret1234567890"), false);
+    assert.equal(payloadText.includes("sk-testsecret1234567890"), false);
+    assert.match(payload.metrics.parameters.command, /sk-t\.\.\.\[REDACTED\]\.\.\.7890/);
+  });
+
+  it("drops sensitive observability fields when redaction fails", async () => {
+    mockCli({ exitCode: 0, stdout: "", stderr: "" }, () => undefined);
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    hook.handler(beforeToolCallEvent(), {
+      sessionId: "session-001",
+      sessionKey: "session-key-001",
+      runId: "run-ctx",
+    });
+    await flushObservabilityWork();
+
+    assert.ok(capturedStdin);
+    const payload = JSON.parse(capturedStdin);
+    assert.deepEqual(payload.metrics, { tool_name: "exec" });
   });
 
   it("keeps correlation metadata out of metrics", () => {
@@ -235,7 +298,7 @@ describe("observability", () => {
     assertMetricsAllowedByAgentSecSchema(payload);
   });
 
-  it("emits llm_input as before_agent_run and model_call_started as before_llm_call", () => {
+  it("emits llm_input as before_agent_run and model_call_started as before_llm_call", async () => {
     mockCli();
     const { api, hooks } = createMockApi();
     observability.register(api);
@@ -252,6 +315,7 @@ describe("observability", () => {
       },
       { sessionId: "session-model", runId: "run-model" },
     );
+    await flushObservabilityWork();
     assert.ok(capturedStdin);
     const inputPayload = JSON.parse(capturedStdin);
     assert.equal(inputPayload.hook, "before_agent_run");
@@ -283,6 +347,7 @@ describe("observability", () => {
       {},
     );
 
+    await flushObservabilityWork();
     assert.ok(capturedStdin);
     const startedPayload = JSON.parse(capturedStdin);
     assert.ok(startedPayload);
@@ -535,7 +600,7 @@ describe("observability", () => {
     assertMetricsAllowedByAgentSecSchema(payload);
   });
 
-  it("uses run-level aggregate metrics provided by agent_end", () => {
+  it("uses run-level aggregate metrics provided by agent_end", async () => {
     mockCli();
     const { api, hooks } = createMockApi();
     observability.register(api);
@@ -574,8 +639,8 @@ describe("observability", () => {
       {},
     );
 
-    assert.ok(capturedStdin);
-    const payload = JSON.parse(capturedStdin);
+    await flushObservabilityWork();
+    const payload = findCapturedPayload("after_agent_run");
     assert.equal(payload.hook, "after_agent_run");
     assert.equal(payload.metrics.total_api_calls, 3);
     assert.equal(payload.metrics.total_tool_calls, 2);
@@ -584,7 +649,7 @@ describe("observability", () => {
     assertMetricsAllowedByAgentSecSchema(payload);
   });
 
-  it("does not derive after_agent_run aggregate metrics from volatile process state", () => {
+  it("does not derive after_agent_run aggregate metrics from volatile process state", async () => {
     mockCli();
     const { api, hooks } = createMockApi();
     observability.register(api);
@@ -619,8 +684,8 @@ describe("observability", () => {
       {},
     );
 
-    assert.ok(capturedStdin);
-    const payload = JSON.parse(capturedStdin);
+    await flushObservabilityWork();
+    const payload = findCapturedPayload("after_agent_run");
     assert.equal(payload.hook, "after_agent_run");
     assert.deepEqual(payload.metrics, { success: true });
     assertMetricsAllowedByAgentSecSchema(payload);
@@ -686,3 +751,13 @@ describe("observability", () => {
   });
 
 });
+
+function findCapturedPayload(hook: string): { hook: string; metrics: Record<string, unknown> } {
+  const payloads = capturedRecords
+    .map((record) => (record.stdin ? JSON.parse(record.stdin) : undefined))
+    .filter((payload): payload is { hook: string; metrics: Record<string, unknown> } =>
+      payload !== undefined && payload.hook === hook,
+    );
+  assert.ok(payloads.length > 0, `expected captured payload for hook ${hook}`);
+  return payloads[payloads.length - 1];
+}

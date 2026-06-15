@@ -16,7 +16,15 @@ scanner_app = typer.Typer(
 )
 
 _OUTPUT_FORMATS = {"json", "text"}
-_SOURCES = {"user_input", "tool_output", "manual", "unknown"}
+_SOURCES = {
+    "user_input",
+    "tool_input",
+    "tool_output",
+    "model_output",
+    "observability",
+    "manual",
+    "unknown",
+}
 _TEXT_OPTION = typer.Option(None, "--text", help="Text to scan.")
 _STDIN_OPTION = typer.Option(
     False,
@@ -60,8 +68,9 @@ _SOURCE_OPTION = typer.Option(
     "unknown",
     "--source",
     help=(
-        "Audit and policy context label: user_input, tool_output, manual, or "
-        "unknown. This does not modify input content."
+        "Audit and policy context label: user_input, tool_input, tool_output, "
+        "model_output, observability, manual, or unknown. This does not modify "
+        "input content."
     ),
 )
 _MAX_BYTES_OPTION = typer.Option(
@@ -180,7 +189,8 @@ def scan_pii(
         raise typer.Exit(code=1)
     if source not in _SOURCES:
         typer.echo(
-            "Error: --source must be one of: user_input, tool_output, manual, unknown.",
+            "Error: --source must be one of: user_input, tool_input, tool_output, "
+            "model_output, observability, manual, unknown.",
             err=True,
         )
         raise typer.Exit(code=1)

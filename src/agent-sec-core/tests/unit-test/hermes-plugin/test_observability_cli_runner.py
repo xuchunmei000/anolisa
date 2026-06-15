@@ -33,18 +33,57 @@ def _record() -> dict:
 
 @patch("src.cli_runner.call_agent_sec_cli")
 def test_record_hermes_observability_uses_openclaw_cli_shape(mock_cli):
-    mock_cli.return_value = CliResult(stdout="", stderr="", exit_code=0)
+    mock_cli.side_effect = [
+        CliResult(
+            stdout=json.dumps({"redacted_text": "hello"}),
+            stderr="",
+            exit_code=0,
+        ),
+        CliResult(stdout="", stderr="", exit_code=0),
+    ]
 
     result = record_hermes_observability(_record(), timeout=5.0)
 
     assert result.exit_code == 0
-    mock_cli.assert_called_once()
-    args, kwargs = mock_cli.call_args
+    assert mock_cli.call_count == 2
+    scan_args, scan_kwargs = mock_cli.call_args_list[0]
+    assert scan_args[0] == [
+        "scan-pii",
+        "--stdin",
+        "--format",
+        "json",
+        "--redact-output",
+        "--source",
+        "observability",
+    ]
+    assert scan_kwargs["stdin"] == "hello"
+    args, kwargs = mock_cli.call_args_list[1]
     assert args[0] == ["observability", "record", "--format", "json", "--stdin"]
     assert kwargs["timeout"] == 5.0
     payload = json.loads(kwargs["stdin"])
     assert payload["hook"] == "before_agent_run"
     assert payload["metadata"]["sessionId"] == "session-1"
+
+
+@patch("src.cli_runner.call_agent_sec_cli")
+def test_record_hermes_observability_redacts_sensitive_payload(mock_cli):
+    mock_cli.side_effect = [
+        CliResult(
+            stdout=json.dumps({"redacted_text": "a***@example.com"}),
+            stderr="",
+            exit_code=0,
+        ),
+        CliResult(stdout="", stderr="", exit_code=0),
+    ]
+    record = _record()
+    record["metrics"]["user_input"] = "alice@example.com"
+
+    record_hermes_observability(record, timeout=5.0)
+
+    payload = json.loads(mock_cli.call_args_list[1].kwargs["stdin"])
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "alice@example.com" not in payload_text
+    assert "a***@example.com" in payload_text
 
 
 @patch("src.cli_runner.subprocess.run")

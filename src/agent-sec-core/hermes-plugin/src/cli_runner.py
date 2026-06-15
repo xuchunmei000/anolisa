@@ -7,6 +7,19 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+_OBSERVABILITY_SENSITIVE_KEYS = {
+    "prompt",
+    "user_input",
+    "system_prompt",
+    "messages",
+    "response",
+    "parameters",
+    "result",
+    "error",
+    "tool_calls",
+}
+_DROP = object()
+
 
 @dataclass
 class CliResult:
@@ -71,6 +84,87 @@ def trace_context(data: dict[str, Any]) -> dict[str, str] | None:
     return context or None
 
 
+def _json_dumps(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _redact_text_for_observability(text: str, timeout: float) -> str | None:
+    result = call_agent_sec_cli(
+        [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--redact-output",
+            "--source",
+            "observability",
+        ],
+        timeout=timeout,
+        stdin=text,
+    )
+    if result.exit_code != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    redacted_text = data.get("redacted_text")
+    return redacted_text if isinstance(redacted_text, str) else None
+
+
+def _redact_sensitive_value(value: Any, timeout: float) -> Any:
+    if isinstance(value, str):
+        redacted = _redact_text_for_observability(value, timeout)
+        return _DROP if redacted is None else redacted
+
+    redacted = _redact_text_for_observability(_json_dumps(value), timeout)
+    if redacted is None:
+        return _DROP
+    try:
+        return json.loads(redacted)
+    except (json.JSONDecodeError, ValueError):
+        return redacted
+
+
+def _redact_observability_value(value: Any, timeout: float) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in _OBSERVABILITY_SENSITIVE_KEYS:
+                safe_item = _redact_sensitive_value(item, timeout)
+            else:
+                safe_item = _redact_observability_value(item, timeout)
+            if safe_item is not _DROP:
+                redacted[key] = safe_item
+        return redacted
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_redact_observability_value(item, timeout) for item in value)
+            if item is not _DROP
+        ]
+    return value
+
+
+def _redact_observability_record(
+    record: dict[str, Any],
+    timeout: float,
+) -> dict[str, Any]:
+    safe_record = dict(record)
+    metrics = safe_record.get("metrics")
+    if isinstance(metrics, dict):
+        safe_record["metrics"] = _redact_observability_value(metrics, timeout)
+    return safe_record
+
+
 def _with_trace_context(
     args: list[str],
     context: dict[str, str] | None,
@@ -89,8 +183,9 @@ def record_hermes_observability(
     timeout: float = 10.0,
 ) -> CliResult:
     """Emit one Hermes observability record via agent-sec-cli stdin."""
+    safe_record = _redact_observability_record(record, timeout)
     return call_agent_sec_cli(
         ["observability", "record", "--format", "json", "--stdin"],
         timeout=timeout,
-        stdin=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+        stdin=json.dumps(safe_record, ensure_ascii=False, separators=(",", ":")),
     )

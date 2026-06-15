@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,20 @@ def _scan_result(verdict: str, findings: list[dict] | None = None) -> CliResult:
     )
 
 
+def _install_gateway_session_context(monkeypatch, session_id: str) -> None:
+    gateway_module = ModuleType("gateway")
+    session_context_module = ModuleType("gateway.session_context")
+
+    def get_session_env(name: str, default: str = "") -> str:
+        assert name == "HERMES_SESSION_ID"
+        return session_id or default
+
+    session_context_module.get_session_env = get_session_env
+    gateway_module.session_context = session_context_module
+    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
+    monkeypatch.setitem(sys.modules, "gateway.session_context", session_context_module)
+
+
 @pytest.fixture
 def capability():
     """Create a default PII scan capability."""
@@ -54,6 +69,8 @@ class TestPiiScanCapability:
 
         assert list(hooks) == [
             "pre_llm_call",
+            "pre_tool_call",
+            "post_tool_call",
             "transform_llm_output",
             "on_session_end",
         ]
@@ -73,10 +90,7 @@ class TestPiiScanCapability:
     def test_missing_user_fields_passthrough(self, mock_cli, capability):
         """Missing user text fields should fail open without invoking scan-pii."""
         result = capability._on_pre_llm_call(session_id="session-1")
-        transformed = capability._on_transform_llm_output(
-            "assistant reply",
-            session_id="session-1",
-        )
+        transformed = capability._on_transform_llm_output("", session_id="session-1")
 
         assert result is None
         assert transformed is None
@@ -116,17 +130,21 @@ class TestPiiScanCapability:
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_warn_verdict_prepends_warning_once(self, mock_cli, capability):
         """Warn verdict should prepend one redacted warning to final output."""
-        mock_cli.return_value = _scan_result(
-            "warn",
-            [
-                {
-                    "type": "email",
-                    "severity": "warn",
-                    "evidence_redacted": "a***@example.com",
-                    "raw_evidence": "alice@example.com",
-                }
-            ],
-        )
+        mock_cli.side_effect = [
+            _scan_result(
+                "warn",
+                [
+                    {
+                        "type": "email",
+                        "severity": "warn",
+                        "evidence_redacted": "a***@example.com",
+                        "raw_evidence": "alice@example.com",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+            _scan_result("pass"),
+        ]
 
         capability._on_pre_llm_call(
             user_message="email alice@example.com",
@@ -154,16 +172,19 @@ class TestPiiScanCapability:
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_deny_verdict_uses_high_risk_warning(self, mock_cli, capability):
         """Deny verdict should still be warning-only but marked high risk."""
-        mock_cli.return_value = _scan_result(
-            "deny",
-            [
-                {
-                    "type": "generic_secret_field",
-                    "severity": "deny",
-                    "evidence_redacted": "password=[REDACTED]",
-                }
-            ],
-        )
+        mock_cli.side_effect = [
+            _scan_result(
+                "deny",
+                [
+                    {
+                        "type": "generic_secret_field",
+                        "severity": "deny",
+                        "evidence_redacted": "password=[REDACTED]",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
 
         capability._on_pre_llm_call(
             user_message="password=super-secret",
@@ -193,6 +214,7 @@ class TestPiiScanCapability:
             "--stdin",
             "--format",
             "json",
+            "--redact-output",
             "--source",
             "user_input",
             "--include-low-confidence",
@@ -219,6 +241,7 @@ class TestPiiScanCapability:
             "--stdin",
             "--format",
             "json",
+            "--redact-output",
             "--source",
             "user_input",
         ]
@@ -233,10 +256,7 @@ class TestPiiScanCapability:
         )
 
         result = capability._on_pre_llm_call(user_message="alice@example.com")
-        transformed = capability._on_transform_llm_output(
-            "assistant reply",
-            session_id="session-1",
-        )
+        transformed = capability._on_transform_llm_output("", session_id="session-1")
 
         assert result is None
         assert transformed is None
@@ -307,7 +327,7 @@ class TestPiiScanCapability:
             session_id="session-1",
         )
         result = cap._on_transform_llm_output(
-            "assistant reply",
+            "",
             session_id="session-1",
         )
 
@@ -327,7 +347,7 @@ class TestPiiScanCapability:
         )
         capability._on_session_end(session_id="session-1")
         result = capability._on_transform_llm_output(
-            "assistant reply",
+            "",
             session_id="session-1",
         )
 
@@ -341,6 +361,7 @@ class TestPiiScanCapability:
                 "warn",
                 [{"type": "email", "severity": "warn", "evidence_redacted": "a***"}],
             ),
+            _scan_result("pass"),
             _scan_result("pass"),
         ]
 
@@ -362,10 +383,17 @@ class TestPiiScanCapability:
     @patch("src.capabilities.pii_scan.call_agent_sec_cli")
     def test_duplicate_warning_is_delivered_once(self, mock_cli, capability):
         """Repeated identical findings in one turn should not duplicate text."""
-        mock_cli.return_value = _scan_result(
-            "warn",
-            [{"type": "email", "severity": "warn", "evidence_redacted": "a***"}],
-        )
+        mock_cli.side_effect = [
+            _scan_result(
+                "warn",
+                [{"type": "email", "severity": "warn", "evidence_redacted": "a***"}],
+            ),
+            _scan_result(
+                "warn",
+                [{"type": "email", "severity": "warn", "evidence_redacted": "a***"}],
+            ),
+            _scan_result("pass"),
+        ]
 
         capability._on_pre_llm_call(
             user_message="alice@example.com",
@@ -382,3 +410,196 @@ class TestPiiScanCapability:
 
         assert result is not None
         assert result.count("[pii-checker]") == 1
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_model_output_is_redacted(self, mock_cli, capability):
+        """transform_llm_output should redact PII from final model text."""
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "type": "email",
+                            "severity": "warn",
+                            "evidence_redacted": "a***@example.com",
+                        }
+                    ],
+                    "redacted_text": "Contact a***@example.com",
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = capability._on_transform_llm_output(
+            "Contact alice@example.com",
+            session_id="session-1",
+        )
+
+        assert result is not None
+        assert "Contact a***@example.com" in result
+        assert "alice@example.com" not in result
+        assert mock_cli.call_args.args[0] == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--redact-output",
+            "--source",
+            "model_output",
+        ]
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_tool_input_warning_is_delivered_on_transform(self, mock_cli, capability):
+        """pre_tool_call findings should be cached for final output."""
+        mock_cli.side_effect = [
+            _scan_result(
+                "deny",
+                [
+                    {
+                        "type": "api_key",
+                        "severity": "deny",
+                        "evidence_redacted": "sk-a...[REDACTED]...1234",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
+
+        capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "API_KEY=sk-abcdefghijklmnop1234"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+        result = capability._on_transform_llm_output(
+            "assistant reply",
+            session_id="session-1",
+        )
+
+        assert result is not None
+        assert "高风险敏感信息" in result
+        assert "sk-a...[REDACTED]...1234" in result
+        assert result.endswith("\n\nassistant reply")
+        assert mock_cli.call_args_list[0].args[0] == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--redact-output",
+            "--source",
+            "tool_input",
+        ]
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_runtime_hermes_session_context_bridges_missing_tool_session_id(
+        self, mock_cli, capability, monkeypatch
+    ):
+        """Runtime session context should bridge tool hook keys to final output."""
+        mock_cli.side_effect = [
+            _scan_result(
+                "warn",
+                [
+                    {
+                        "type": "email",
+                        "severity": "warn",
+                        "evidence_redacted": "a***@example.com",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+            _scan_result("pass"),
+        ]
+        _install_gateway_session_context(monkeypatch, "hermes-session-1")
+
+        capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "echo alice@example.com"},
+            session_id="",
+            task_id="task-1",
+            tool_call_id="tool-1",
+        )
+
+        assert list(capability._warnings_by_key) == ["session_id:hermes-session-1"]
+        output = capability._on_transform_llm_output(
+            response_text="assistant response",
+            session_id="hermes-session-1",
+        )
+        second = capability._on_transform_llm_output(
+            response_text="assistant response",
+            session_id="hermes-session-1",
+        )
+
+        assert output is not None
+        assert "a***@example.com" in output
+        assert output.endswith("\n\nassistant response")
+        assert second is None
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_cached_tool_warning_is_delivered_when_final_output_is_empty(
+        self, mock_cli, capability
+    ):
+        """Empty final model text should still deliver and clear cached warnings."""
+        mock_cli.return_value = _scan_result(
+            "warn",
+            [{"type": "email", "severity": "warn", "evidence_redacted": "a***"}],
+        )
+
+        capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "echo alice@example.com"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+        output = capability._on_transform_llm_output("", session_id="session-1")
+        second = capability._on_transform_llm_output("", session_id="session-1")
+
+        assert output is not None
+        assert output.startswith("[pii-checker]")
+        assert "a***" in output
+        assert "\n\n" not in output
+        assert second is None
+        assert mock_cli.call_count == 1
+
+    @patch("src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_tool_output_warning_is_delivered_on_transform(self, mock_cli, capability):
+        """post_tool_call findings should be cached for final output."""
+        mock_cli.side_effect = [
+            _scan_result(
+                "warn",
+                [
+                    {
+                        "type": "phone_cn",
+                        "severity": "warn",
+                        "evidence_redacted": "138****8000",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
+
+        capability._on_post_tool_call(
+            tool_name="terminal",
+            args={"command": "cat log"},
+            result={"stdout": "phone 13800138000"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+        result = capability._on_transform_llm_output(
+            "assistant reply",
+            session_id="session-1",
+        )
+
+        assert result is not None
+        assert "phone_cn" in result
+        assert "138****8000" in result
+        assert mock_cli.call_args_list[0].args[0] == [
+            "scan-pii",
+            "--stdin",
+            "--format",
+            "json",
+            "--redact-output",
+            "--source",
+            "tool_output",
+        ]

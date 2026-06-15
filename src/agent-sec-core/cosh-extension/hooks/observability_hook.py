@@ -24,6 +24,28 @@ _OBSERVABILITY_COMMAND = [
     "json",
     "--stdin",
 ]
+_PII_REDACT_COMMAND = [
+    "agent-sec-cli",
+    "scan-pii",
+    "--stdin",
+    "--format",
+    "json",
+    "--redact-output",
+    "--source",
+    "observability",
+]
+_SENSITIVE_METRIC_KEYS = {
+    "prompt",
+    "user_input",
+    "system_prompt",
+    "messages",
+    "response",
+    "parameters",
+    "result",
+    "error",
+    "tool_calls",
+}
+_DROP = object()
 
 
 def _noop() -> str:
@@ -39,6 +61,10 @@ def _json_dumps(value: Any) -> str:
         sort_keys=True,
         default=str,
     )
+
+
+def _json_loads(value: str) -> Any:
+    return json.loads(value)
 
 
 def _json_size_bytes(value: Any) -> int:
@@ -175,6 +201,77 @@ def _process_output_details(*values: Any) -> str:
     return "no stderr or stdout was captured"
 
 
+def _redact_text(text: str) -> str | None:
+    try:
+        result = subprocess.run(
+            _PII_REDACT_COMMAND,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=_CLI_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        data = _json_loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    redacted = data.get("redacted_text")
+    return redacted if isinstance(redacted, str) else None
+
+
+def _redact_sensitive_value(value: Any) -> Any:
+    """Redact a sensitive metric value, or return _DROP on scan failure."""
+    if isinstance(value, str):
+        redacted = _redact_text(value)
+        return _DROP if redacted is None else redacted
+
+    serialized = _json_dumps(value)
+    redacted = _redact_text(serialized)
+    if redacted is None:
+        return _DROP
+    try:
+        return _json_loads(redacted)
+    except (json.JSONDecodeError, ValueError):
+        return redacted
+
+
+def _redact_metrics(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in _SENSITIVE_METRIC_KEYS:
+                safe_item = _redact_sensitive_value(item)
+            else:
+                safe_item = _redact_metrics(item)
+            if safe_item is not _DROP:
+                redacted[key] = safe_item
+        return redacted
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_redact_metrics(item) for item in value)
+            if item is not _DROP
+        ]
+    return value
+
+
+def _redact_observability_record(record: dict[str, Any]) -> dict[str, Any]:
+    safe_record = dict(record)
+    metrics = safe_record.get("metrics")
+    if isinstance(metrics, dict):
+        safe_record["metrics"] = _redact_metrics(metrics)
+    return safe_record
+
+
 def _build_user_prompt_submit(input_data: dict[str, Any]) -> dict[str, Any] | None:
     metrics: dict[str, Any] = {}
     if "prompt" in input_data:
@@ -307,6 +404,7 @@ def _build_record(input_data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _record_observability(record: dict[str, Any]) -> None:
+    record = _redact_observability_record(record)
     try:
         result = subprocess.run(
             _OBSERVABILITY_COMMAND,

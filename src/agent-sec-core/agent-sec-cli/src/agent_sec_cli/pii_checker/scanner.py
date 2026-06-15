@@ -16,7 +16,15 @@ from agent_sec_cli.pii_checker.redactor import redact_text, redact_value
 
 DEFAULT_MAX_BYTES = 1_048_576
 LOW_CONFIDENCE_THRESHOLD = 0.5
-ALLOWED_SOURCES = {"user_input", "tool_output", "manual", "unknown"}
+ALLOWED_SOURCES = {
+    "user_input",
+    "tool_input",
+    "tool_output",
+    "model_output",
+    "observability",
+    "manual",
+    "unknown",
+}
 _MULTI_TYPE_OVERLAPS = {frozenset({"bearer_token", "jwt"})}
 
 

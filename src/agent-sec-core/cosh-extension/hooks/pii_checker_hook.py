@@ -17,7 +17,10 @@ from typing import Any
 
 from trace_context import with_trace_context
 
-_DEFAULT_SOURCE = "user_input"
+_USER_INPUT_SOURCE = "user_input"
+_TOOL_INPUT_SOURCE = "tool_input"
+_TOOL_OUTPUT_SOURCE = "tool_output"
+_MODEL_OUTPUT_SOURCE = "model_output"
 _MAX_EVIDENCE_ITEMS = 3
 _MAX_EVIDENCE_CHARS = 80
 
@@ -33,6 +36,16 @@ def _as_list(value: Any) -> list[Any]:
 
 def _safe_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
@@ -81,6 +94,116 @@ def _format_pii_warning(verdict: str, findings: list[Any]) -> str:
     return "；".join(parts)
 
 
+def _scan_text(
+    input_data: dict[str, Any], text: str, source: str
+) -> dict[str, Any] | None:
+    """Run scan-pii with a source label and parse JSON output."""
+    try:
+        cmd = with_trace_context(
+            [
+                "agent-sec-cli",
+                "scan-pii",
+                "--stdin",
+                "--format",
+                "json",
+                "--redact-output",
+                "--source",
+                source,
+            ],
+            input_data,
+        )
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            check=False,
+            input=text,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    try:
+        scan_result = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return scan_result if isinstance(scan_result, dict) else None
+
+
+def _extract_response_text(llm_response: Any) -> str:
+    """Extract text from common Cosh AfterModel response shapes."""
+    if isinstance(llm_response, str):
+        return llm_response
+    if not isinstance(llm_response, dict):
+        return ""
+
+    text = llm_response.get("text")
+    if isinstance(text, str):
+        return text
+
+    candidates = llm_response.get("candidates")
+    if not isinstance(candidates, list):
+        return ""
+
+    parts: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        candidate_parts = content.get("parts")
+        if isinstance(candidate_parts, str):
+            parts.append(candidate_parts)
+        elif isinstance(candidate_parts, list):
+            for part in candidate_parts:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+    return "".join(parts)
+
+
+def _extract_scan_target(input_data: dict[str, Any]) -> tuple[str, str]:
+    """Return text and source for supported Cosh hook events."""
+    event_name = _safe_text(input_data.get("hook_event_name"))
+    if not event_name:
+        event_name = _safe_text(input_data.get("hookEventName"))
+
+    if event_name in {"", "UserPromptSubmit"}:
+        return _safe_text(input_data.get("prompt")), _USER_INPUT_SOURCE
+
+    if event_name == "PreToolUse":
+        if "tool_input" not in input_data:
+            return "", _TOOL_INPUT_SOURCE
+        value = input_data.get("tool_input")
+        return (
+            value if isinstance(value, str) else _json_dumps(value)
+        ), _TOOL_INPUT_SOURCE
+
+    if event_name == "PostToolUse":
+        if "tool_response" not in input_data:
+            return "", _TOOL_OUTPUT_SOURCE
+        value = input_data.get("tool_response")
+        return (
+            value if isinstance(value, str) else _json_dumps(value)
+        ), _TOOL_OUTPUT_SOURCE
+
+    if event_name == "PostToolUseFailure":
+        return _safe_text(input_data.get("error")), _TOOL_OUTPUT_SOURCE
+
+    if event_name == "AfterModel":
+        return (
+            _extract_response_text(input_data.get("llm_response")),
+            _MODEL_OUTPUT_SOURCE,
+        )
+
+    return "", "unknown"
+
+
 def _format_cosh(scan_result: dict[str, Any]) -> str:
     """Convert a scan-pii result dict into a cosh HookOutput JSON string.
 
@@ -112,46 +235,19 @@ def main() -> None:
         print(_allow())
         return
 
-    prompt_text = input_data.get("prompt", "")
-    if not isinstance(prompt_text, str) or not prompt_text.strip():
+    if not isinstance(input_data, dict):
         print(_allow())
         return
 
-    try:
-        cmd = with_trace_context(
-            [
-                "agent-sec-cli",
-                "scan-pii",
-                "--stdin",
-                "--format",
-                "json",
-                "--source",
-                _DEFAULT_SOURCE,
-            ],
-            input_data,
-        )
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            check=False,
-            input=prompt_text,
-            text=True,
-            timeout=10,
-        )
-    except Exception:
+    scan_text, source = _extract_scan_target(input_data)
+    if not isinstance(scan_text, str) or not scan_text.strip():
         print(_allow())
         return
 
-    if proc.returncode != 0:
+    scan_result = _scan_text(input_data, scan_text, source)
+    if scan_result is None:
         print(_allow())
         return
-
-    try:
-        scan_result = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
-        print(_allow())
-        return
-
     print(_format_cosh(scan_result))
 
 

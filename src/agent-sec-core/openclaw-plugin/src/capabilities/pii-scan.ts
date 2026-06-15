@@ -1,5 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import { callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli } from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
 const MAX_EVIDENCE_ITEMS = 3;
@@ -78,14 +78,15 @@ function formatPiiWarning(
   return parts.join("；");
 }
 
-function buildScanArgs(includeLowConfidence: boolean): string[] {
+function buildScanArgs(source: string, includeLowConfidence: boolean): string[] {
   const args = [
     "scan-pii",
     "--stdin",
     "--format",
     "json",
+    "--redact-output",
     "--source",
-    "user_input",
+    source,
   ];
   if (includeLowConfidence) {
     args.push("--include-low-confidence");
@@ -101,6 +102,87 @@ function getInboundText(event: any): string {
   return typeof event?.body === "string" ? event.body : "";
 }
 
+function valueToText(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getModelOutputText(event: any): string {
+  const response = safeString(event?.response);
+  if (response.trim()) {
+    return response;
+  }
+  const lastAssistant = safeString(event?.lastAssistant ?? event?.last_assistant);
+  if (lastAssistant.trim()) {
+    return lastAssistant;
+  }
+  const assistantTexts = Array.isArray(event?.assistantTexts)
+    ? event.assistantTexts
+    : Array.isArray(event?.assistant_texts)
+      ? event.assistant_texts
+      : [];
+  return assistantTexts.filter((item: unknown) => typeof item === "string").join("\n");
+}
+
+function getToolOutputText(event: any): string {
+  const result = valueToText(event?.result);
+  if (result.trim()) {
+    return result;
+  }
+  return safeString(event?.error);
+}
+
+async function scanPiiText(
+  api: any,
+  cfg: PiiScanConfig,
+  event: any,
+  ctx: any,
+  text: string,
+  source: string,
+): Promise<{ verdict: string; findings: unknown[] } | undefined> {
+  const result = await callAgentSecCli(buildScanArgs(source, cfg.includeLowConfidence), {
+    timeout: CLI_TIMEOUT_MS,
+    stdin: text,
+    traceContext: buildTraceContext(event, ctx),
+  });
+  if (result.exitCode !== 0) {
+    api.logger.warn(`[pii-checker] CLI failed: ${result.stderr || result.exitCode}`);
+    return undefined;
+  }
+
+  const scanResult = JSON.parse(result.stdout) as {
+    verdict?: unknown;
+    findings?: unknown;
+  };
+  return {
+    verdict: safeString(scanResult.verdict) || "pass",
+    findings: Array.isArray(scanResult.findings) ? scanResult.findings : [],
+  };
+}
+
+function logPiiWarning(
+  api: any,
+  verdict: string,
+  findings: unknown[],
+  cfg: PiiScanConfig,
+  finalMessage?: string,
+): string {
+  const warning = formatPiiWarning(verdict, findings, finalMessage);
+  api.logger.warn(
+    `[pii-checker] ${verdict.toUpperCase()} (enableBlock=${cfg.enableBlock}) — ${warning}`,
+  );
+  return warning;
+}
+
 /**
  * 用户输入 PII / 凭据检测。
  *
@@ -110,7 +192,7 @@ function getInboundText(event: any): string {
 export const piiScan: SecurityCapability = {
   id: "pii-scan-user-input",
   name: "PII Checker",
-  hooks: ["before_dispatch"],
+  hooks: ["before_dispatch", "before_tool_call", "after_tool_call", "llm_output"],
   register(api) {
     const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
     if (!cfg.scanUserInput) {
@@ -120,30 +202,16 @@ export const piiScan: SecurityCapability = {
 
     api.on(
       "before_dispatch",
-      async (event: any) => {
+      async (event: any, ctx: any) => {
         try {
           const text = getInboundText(event);
           if (!text.trim()) {
             return undefined;
           }
 
-          const result = await callAgentSecCli(buildScanArgs(cfg.includeLowConfidence), {
-            timeout: CLI_TIMEOUT_MS,
-            stdin: text,
-          });
-          if (result.exitCode !== 0) {
-            api.logger.warn(`[pii-checker] CLI failed: ${result.stderr || result.exitCode}`);
-            return undefined;
-          }
-
-          const scanResult = JSON.parse(result.stdout) as {
-            verdict?: unknown;
-            findings?: unknown;
-          };
-          const verdict = safeString(scanResult.verdict) || "pass";
-          const findings = Array.isArray(scanResult.findings)
-            ? scanResult.findings
-            : [];
+          const scanResult = await scanPiiText(api, cfg, event, ctx, text, "user_input");
+          if (scanResult === undefined) return undefined;
+          const { verdict, findings } = scanResult;
 
           if (verdict === "pass" || findings.length === 0) {
             api.logger.info("[pii-checker] pass");
@@ -154,13 +222,12 @@ export const piiScan: SecurityCapability = {
             return undefined;
           }
 
-          const warning = formatPiiWarning(
+          const warning = logPiiWarning(
+            api,
             verdict,
             findings,
+            cfg,
             verdict === "deny" && cfg.enableBlock ? "本轮请求已被阻断。" : undefined,
-          );
-          api.logger.warn(
-            `[pii-checker] ${verdict.toUpperCase()} (enableBlock=${cfg.enableBlock}) — ${warning}`,
           );
           if (verdict === "deny" && cfg.enableBlock) {
             return {
@@ -178,5 +245,75 @@ export const piiScan: SecurityCapability = {
       },
       { priority: BEFORE_DISPATCH_PRIORITY },
     );
+
+    api.on(
+      "before_tool_call",
+      async (event: any, ctx: any) => {
+        try {
+          const text = valueToText(event?.params ?? event?.parameters ?? event?.args);
+          if (!text.trim()) return undefined;
+          const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_input");
+          if (scanResult === undefined) return undefined;
+          const { verdict, findings } = scanResult;
+          if (verdict === "pass" || findings.length === 0) return undefined;
+          if (verdict !== "warn" && verdict !== "deny") return undefined;
+          const warning = logPiiWarning(
+            api,
+            verdict,
+            findings,
+            cfg,
+            verdict === "deny" && cfg.enableBlock ? "本次工具调用已被阻断。" : undefined,
+          );
+          if (verdict === "deny" && cfg.enableBlock) {
+            return { block: true, blockReason: warning };
+          }
+          return undefined;
+        } catch (error) {
+          api.logger.warn(
+            `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return undefined;
+        }
+      },
+      { priority: BEFORE_DISPATCH_PRIORITY },
+    );
+
+    api.on("after_tool_call", async (event: any, ctx: any) => {
+      try {
+        const text = getToolOutputText(event);
+        if (!text.trim()) return undefined;
+        const scanResult = await scanPiiText(api, cfg, event, ctx, text, "tool_output");
+        if (scanResult === undefined) return undefined;
+        const { verdict, findings } = scanResult;
+        if (verdict === "pass" || findings.length === 0) return undefined;
+        if (verdict !== "warn" && verdict !== "deny") return undefined;
+        logPiiWarning(api, verdict, findings, cfg);
+        return undefined;
+      } catch (error) {
+        api.logger.warn(
+          `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return undefined;
+      }
+    });
+
+    api.on("llm_output", async (event: any, ctx: any) => {
+      try {
+        const text = getModelOutputText(event);
+        if (!text.trim()) return undefined;
+        const scanResult = await scanPiiText(api, cfg, event, ctx, text, "model_output");
+        if (scanResult === undefined) return undefined;
+        const { verdict, findings } = scanResult;
+        if (verdict === "pass" || findings.length === 0) return undefined;
+        if (verdict !== "warn" && verdict !== "deny") return undefined;
+        logPiiWarning(api, verdict, findings, cfg);
+        return undefined;
+      } catch (error) {
+        api.logger.warn(
+          `[pii-checker] failed open: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return undefined;
+      }
+    });
   },
 };

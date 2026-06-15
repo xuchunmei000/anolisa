@@ -39,6 +39,17 @@
         "hooks": [
           {
             "type": "command",
+            "name": "pii-checker",
+            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "description": "Scans tool inputs for PII and credentials.",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "name": "observability-hook",
             "command": "python3 ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
@@ -96,6 +107,17 @@
         "hooks": [
           {
             "type": "command",
+            "name": "pii-checker",
+            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "description": "Scans model responses for PII and credentials.",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "name": "observability-hook",
             "command": "python3 ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
@@ -109,6 +131,17 @@
         "hooks": [
           {
             "type": "command",
+            "name": "pii-checker",
+            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "description": "Scans tool outputs for PII and credentials.",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "name": "observability-hook",
             "command": "python3 ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
@@ -118,6 +151,17 @@
       }
     ],
     "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "pii-checker",
+            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "description": "Scans tool errors for PII and credentials.",
+            "timeout": 10000
+          }
+        ]
+      },
       {
         "hooks": [
           {

@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { piiScan } from "../../src/capabilities/pii-scan.js";
 import { _setCliMock, _resetCliMock } from "../../src/utils.js";
-import type { CliResult } from "../../src/utils.js";
+import type { CliCallOptions, CliResult } from "../../src/utils.js";
 
 type RegisteredHook = {
   hookName: string;
@@ -45,7 +45,7 @@ function enableBlockConfig(enableBlock: boolean): Record<string, any> {
 }
 
 let lastCliArgs: string[] | undefined;
-let lastCliOpts: { timeout?: number; stdin?: string } | undefined;
+let lastCliOpts: CliCallOptions | undefined;
 
 function mockCli(result: CliResult) {
   _setCliMock(async (args, opts) => {
@@ -93,14 +93,19 @@ describe("pii-scan-user-input", () => {
     _resetCliMock();
   });
 
-  it("registers only before_dispatch before prompt-scan priority", () => {
+  it("registers all PII scan hooks before prompt-scan priority", () => {
     const { hooks } = registerHandlers();
 
     assert.deepEqual(
       hooks.map((hook) => hook.hookName),
-      ["before_dispatch"],
+      ["before_dispatch", "before_tool_call", "after_tool_call", "llm_output"],
     );
-    assert.deepEqual(piiScan.hooks, ["before_dispatch"]);
+    assert.deepEqual(piiScan.hooks, [
+      "before_dispatch",
+      "before_tool_call",
+      "after_tool_call",
+      "llm_output",
+    ]);
     assert.equal(hooks[0].priority, 200);
   });
 
@@ -124,6 +129,7 @@ describe("pii-scan-user-input", () => {
       "--stdin",
       "--format",
       "json",
+      "--redact-output",
       "--source",
       "user_input",
     ]);
@@ -197,6 +203,83 @@ describe("pii-scan-user-input", () => {
     assert.match(result?.text, /本轮请求已被阻断/);
     assert.doesNotMatch(result?.text, /password=secret/);
     assert.doesNotMatch(result?.text, /raw_evidence/);
+  });
+
+  it("blocks before_tool_call deny when enableBlock=true", async () => {
+    const { hooks } = registerHandlers(enableBlockConfig(true));
+    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    assert.ok(beforeToolCall);
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeToolCall.handler(
+      {
+        toolName: "exec",
+        params: { command: "password=secret" },
+        sessionId: "session-1",
+        toolCallId: "tool-1",
+      },
+      {},
+    );
+
+    assert.equal(result?.block, true);
+    assert.match(result?.blockReason, /\[pii-checker\]/);
+    assert.match(result?.blockReason, /本次工具调用已被阻断/);
+    assert.doesNotMatch(result?.blockReason, /password=secret/);
+    assert.deepEqual(lastCliArgs, [
+      "--trace-context",
+      '{"session_id":"session-1","tool_call_id":"tool-1"}',
+      "scan-pii",
+      "--stdin",
+      "--format",
+      "json",
+      "--redact-output",
+      "--source",
+      "tool_input",
+    ]);
+    assert.equal(lastCliOpts?.stdin, '{"command":"password=secret"}');
+  });
+
+  it("after_tool_call logs warning without raw evidence", async () => {
+    const { hooks, logs } = registerHandlers();
+    const afterToolCall = hooks.find((hook) => hook.hookName === "after_tool_call");
+    assert.ok(afterToolCall);
+    mockCli(scanResult("warn", [warnFinding]));
+
+    const result = await afterToolCall.handler(
+      {
+        result: { content: "email alice@example.com" },
+        sessionId: "session-1",
+        toolCallId: "tool-1",
+      },
+      {},
+    );
+
+    assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("[pii-checker] WARN")));
+    assert.ok(logs.some((log) => log.includes("a***@example.com")));
+    assert.ok(!logs.some((log) => log.includes("alice@example.com")));
+    assert.equal(lastCliArgs?.at(-1), "tool_output");
+  });
+
+  it("llm_output logs warning without raw evidence", async () => {
+    const { hooks, logs } = registerHandlers();
+    const llmOutput = hooks.find((hook) => hook.hookName === "llm_output");
+    assert.ok(llmOutput);
+    mockCli(scanResult("warn", [warnFinding]));
+
+    const result = await llmOutput.handler(
+      {
+        assistantTexts: ["email alice@example.com"],
+        sessionId: "session-1",
+      },
+      {},
+    );
+
+    assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("[pii-checker] WARN")));
+    assert.ok(logs.some((log) => log.includes("a***@example.com")));
+    assert.ok(!logs.some((log) => log.includes("alice@example.com")));
+    assert.equal(lastCliArgs?.at(-1), "model_output");
   });
 
   it("CLI nonzero fails open", async () => {

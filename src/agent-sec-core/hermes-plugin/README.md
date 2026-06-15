@@ -186,17 +186,17 @@ CLI 调用方式和 `openclaw-plugin` 保持一致：helper 将一条 JSON paylo
 
 ### pii-scan-user-input
 
-`pii-scan-user-input` 对齐 Cosh/OpenClaw PII checker v1 语义：
+`pii-scan-user-input` 对齐 Cosh/OpenClaw 多点位 PII checker 语义：
 
-- 挂在 `pre_llm_call`、`transform_llm_output`、`on_session_end`
-- 只扫描本轮用户输入，不扫描 history、tool output 或 terminal 原始输出
-- 调用 `agent-sec-cli scan-pii --stdin --format json --source user_input`，敏感原文仅通过 stdin 传入子进程
-- `warn` / `deny` 不阻断请求，只缓存脱敏 warning
-- `transform_llm_output` 在最终回复前 prepend warning，成功交付后清理缓存
+- 挂在 `pre_llm_call`、`pre_tool_call`、`post_tool_call`、`transform_llm_output`、`on_session_end`
+- 扫描本轮用户输入、tool 参数、tool 返回结果和最终模型回复；不扫描 history、memory 或 RAG context
+- 调用 `agent-sec-cli scan-pii --stdin --format json --redact-output --source <source>`，敏感原文仅通过 stdin 传入子进程
+- tool 参数/结果的 `warn` / `deny` 不阻断请求，只缓存脱敏 warning
+- `transform_llm_output` 会扫描最终模型回复；命中时使用 `redacted_text` 替换用户可见回复，并 prepend 已缓存 warning
 - 当前实现依赖 Hermes 对完整最终回复调用一次 `transform_llm_output`；若未来改成流式分片 transform，需要重新审视 warning pop 语义
 - `on_session_end` 清理残留缓存
 - 所有异常、超时、非 JSON 输出、未知 verdict 都 fail-open
-- warning 只使用 `evidence_redacted`，不展示 raw evidence 或原始用户输入
+- warning 只使用 `evidence_redacted`，不展示 raw evidence 或原始文本
 
 ### prompt-scan-user-input
 

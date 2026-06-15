@@ -633,6 +633,26 @@ class TestScanPiiCli(unittest.TestCase):
         self.assertIn("--source must be one of", result.output)
 
     @patch("agent_sec_cli.pii_checker.cli.invoke")
+    def test_scan_pii_accepts_runtime_sources(self, mock_invoke):
+        mock_invoke.return_value = ActionResult(
+            success=True,
+            exit_code=0,
+            stdout='{"ok": true, "verdict": "pass"}',
+            data={"ok": True, "verdict": "pass", "summary": {"total": 0}},
+        )
+
+        for source in ["tool_input", "tool_output", "model_output", "observability"]:
+            with self.subTest(source=source):
+                result = self.runner.invoke(
+                    app,
+                    ["scan-pii", "--text", "hello", "--source", source],
+                )
+
+                self.assertEqual(result.exit_code, 0)
+                _, kwargs = mock_invoke.call_args
+                self.assertEqual(kwargs["source"], source)
+
+    @patch("agent_sec_cli.pii_checker.cli.invoke")
     def test_scan_pii_input_default_reads_full_file(self, mock_invoke):
         mock_invoke.return_value = ActionResult(
             success=True,

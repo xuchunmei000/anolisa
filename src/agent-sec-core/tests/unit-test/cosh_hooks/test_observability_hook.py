@@ -282,6 +282,12 @@ def test_main_invokes_observability_cli_with_record(monkeypatch, capsys):
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
+        if "scan-pii" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"redacted_text": kwargs["input"]}),
+                stderr="",
+            )
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(observability_hook.subprocess, "run", fake_run)
@@ -294,8 +300,8 @@ def test_main_invokes_observability_cli_with_record(monkeypatch, capsys):
     observability_hook.main()
 
     assert json.loads(capsys.readouterr().out) == {}
-    assert len(calls) == 1
-    cmd, kwargs = calls[0]
+    assert len(calls) == 3
+    cmd, kwargs = calls[-1]
     assert cmd == [
         "agent-sec-cli",
         "observability",
@@ -306,6 +312,43 @@ def test_main_invokes_observability_cli_with_record(monkeypatch, capsys):
     ]
     assert kwargs["text"] is True
     assert json.loads(kwargs["input"])["hook"] == "before_agent_run"
+
+
+def test_main_redacts_observability_payload_before_record(monkeypatch, capsys):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if "scan-pii" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "redacted_text": kwargs["input"].replace(
+                            "alice@example.com", "a***@example.com"
+                        )
+                    }
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(observability_hook.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(_base("UserPromptSubmit", prompt="email alice@example.com"))
+        ),
+    )
+
+    observability_hook.main()
+
+    assert json.loads(capsys.readouterr().out) == {}
+    payload = json.loads(calls[-1][1]["input"])
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert "alice@example.com" not in payload_text
+    assert "a***@example.com" in payload_text
 
 
 def test_main_invalid_json_returns_noop_without_cli(monkeypatch, capsys):

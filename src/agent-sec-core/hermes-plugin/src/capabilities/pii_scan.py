@@ -17,6 +17,11 @@ _DEFAULT_WARNING_TTL_SECONDS = 300.0
 _MAX_EVIDENCE_ITEMS = 3
 _MAX_EVIDENCE_CHARS = 80
 _USER_INPUT_SOURCE = "user_input"
+_TOOL_INPUT_SOURCE = "tool_input"
+_TOOL_OUTPUT_SOURCE = "tool_output"
+_MODEL_OUTPUT_SOURCE = "model_output"
+_CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id")
+_HERMES_SESSION_ENV = "HERMES_SESSION_ID"
 
 
 @dataclass
@@ -53,6 +58,8 @@ class PiiScanCapability(AgentSecCoreCapability):
     def get_hooks_define(self) -> dict:
         return {
             "pre_llm_call": self._on_pre_llm_call,
+            "pre_tool_call": self._on_pre_tool_call,
+            "post_tool_call": self._on_post_tool_call,
             "transform_llm_output": self._on_transform_llm_output,
             "on_session_end": self._on_session_end,
         }
@@ -73,27 +80,66 @@ class PiiScanCapability(AgentSecCoreCapability):
             return None
 
         self._warnings_by_key.pop(cache_key, None)
-        scan = self._scan_text(user_text, trace_context(kwargs))
-        if scan is None:
+        self._scan_and_cache(
+            user_text,
+            source=_USER_INPUT_SOURCE,
+            cache_key=cache_key,
+            security_trace_context=trace_context(kwargs),
+        )
+        return None
+
+    def _on_pre_tool_call(
+        self,
+        *,
+        tool_name: Any,
+        args: Any,
+        **kwargs: Any,
+    ):
+        """Scan tool arguments before execution."""
+        self._cleanup_expired()
+        text = self._value_to_text(args)
+        if not text.strip():
             return None
-
-        verdict = self._safe_string(scan.get("verdict")) or "pass"
-        findings = self._as_list(scan.get("findings"))
-
-        if verdict == "pass" or not findings:
-            logger.info(f"[agent-sec-core] {self.id} PASS")
-            return None
-
-        if verdict not in {"warn", "deny"}:
+        cache_key = self._cache_key(kwargs)
+        if cache_key is None:
             logger.warning(
-                f"[agent-sec-core] {self.id} UNKNOWN verdict={verdict}, fail-open"
+                f"[agent-sec-core] {self.id} missing session/task key for tool input, fail-open"
             )
             return None
+        data = {"tool_name": tool_name, "args": args, **kwargs}
+        self._scan_and_cache(
+            text,
+            source=_TOOL_INPUT_SOURCE,
+            cache_key=cache_key,
+            security_trace_context=trace_context(data),
+        )
+        return None
 
-        warning = self._format_pii_warning(verdict, findings)
-        self._push_warning(cache_key, warning)
-        logger.warning(
-            f"[agent-sec-core] {self.id} {verdict.upper()} warning cached key={cache_key}"
+    def _on_post_tool_call(
+        self,
+        *,
+        tool_name: Any,
+        args: Any,
+        result: Any,
+        **kwargs: Any,
+    ):
+        """Scan tool output after execution."""
+        self._cleanup_expired()
+        text = self._value_to_text(result)
+        if not text.strip():
+            return None
+        cache_key = self._cache_key(kwargs)
+        if cache_key is None:
+            logger.warning(
+                f"[agent-sec-core] {self.id} missing session/task key for tool output, fail-open"
+            )
+            return None
+        data = {"tool_name": tool_name, "args": args, "result": result, **kwargs}
+        self._scan_and_cache(
+            text,
+            source=_TOOL_OUTPUT_SOURCE,
+            cache_key=cache_key,
+            security_trace_context=trace_context(data),
         )
         return None
 
@@ -105,21 +151,49 @@ class PiiScanCapability(AgentSecCoreCapability):
     ):
         """Prepend cached PII warnings to the final user-visible response."""
         self._cleanup_expired()
-        if not isinstance(response_text, str) or not response_text:
+        if not isinstance(response_text, str):
             return None
 
         cache_key = self._cache_key({"session_id": session_id, **kwargs})
         if cache_key is None:
             return None
 
-        warnings = self._pop_warnings(cache_key)
-        if not warnings:
+        warnings = self._pop_warnings(cache_key) if cache_key is not None else []
+        output_text = response_text
+        if response_text.strip():
+            scan = self._scan_text(
+                response_text,
+                source=_MODEL_OUTPUT_SOURCE,
+                security_trace_context=trace_context(
+                    {"session_id": session_id, **kwargs}
+                ),
+            )
+            if scan is not None:
+                verdict = self._safe_string(scan.get("verdict")) or "pass"
+                findings = self._as_list(scan.get("findings"))
+                if verdict in {"warn", "deny"} and findings:
+                    warnings.append(self._format_pii_warning(verdict, findings))
+                    redacted_text = self._safe_string(scan.get("redacted_text"))
+                    if redacted_text:
+                        output_text = redacted_text
+                    logger.warning(
+                        f"[agent-sec-core] {self.id} {verdict.upper()} model output redacted"
+                    )
+                elif verdict not in {"pass", "warn", "deny"}:
+                    logger.warning(
+                        f"[agent-sec-core] {self.id} UNKNOWN model output verdict={verdict}, fail-open"
+                    )
+
+        if not warnings and output_text == response_text:
             return None
 
-        # Hermes currently calls transform_llm_output once with the complete
-        # final response. If it later switches to chunk-level streaming
-        # transforms, this pop-once delivery policy should be revisited.
-        return "\n".join(warnings) + "\n\n" + response_text
+        if warnings:
+            warning_text = "\n".join(warnings)
+            if output_text:
+                return f"{warning_text}\n\n{output_text}"
+            return warning_text
+
+        return output_text
 
     def _on_session_end(self, session_id: str = "", **kwargs):
         """Clean cached warnings when Hermes ends a session."""
@@ -132,6 +206,8 @@ class PiiScanCapability(AgentSecCoreCapability):
     def _scan_text(
         self,
         text: str,
+        *,
+        source: str,
         security_trace_context: dict[str, str] | None,
     ) -> dict[str, Any] | None:
         """Run agent-sec-cli scan-pii and parse its JSON output."""
@@ -140,8 +216,9 @@ class PiiScanCapability(AgentSecCoreCapability):
             "--stdin",
             "--format",
             "json",
+            "--redact-output",
             "--source",
-            _USER_INPUT_SOURCE,
+            source,
         ]
         if self._include_low_confidence:
             args.append("--include-low-confidence")
@@ -172,6 +249,42 @@ class PiiScanCapability(AgentSecCoreCapability):
             )
             return None
         return scan
+
+    def _scan_and_cache(
+        self,
+        text: str,
+        *,
+        source: str,
+        cache_key: str,
+        security_trace_context: dict[str, str] | None,
+    ) -> None:
+        """Scan text and cache a minimal warning for warn/deny results."""
+        scan = self._scan_text(
+            text,
+            source=source,
+            security_trace_context=security_trace_context,
+        )
+        if scan is None:
+            return
+
+        verdict = self._safe_string(scan.get("verdict")) or "pass"
+        findings = self._as_list(scan.get("findings"))
+
+        if verdict == "pass" or not findings:
+            logger.info(f"[agent-sec-core] {self.id} PASS source={source}")
+            return
+
+        if verdict not in {"warn", "deny"}:
+            logger.warning(
+                f"[agent-sec-core] {self.id} UNKNOWN verdict={verdict}, fail-open"
+            )
+            return
+
+        warning = self._format_pii_warning(verdict, findings)
+        self._push_warning(cache_key, warning)
+        logger.warning(
+            f"[agent-sec-core] {self.id} {verdict.upper()} warning cached key={cache_key} source={source}"
+        )
 
     def _extract_user_text(self, messages, kwargs: dict[str, Any]) -> str:
         """Extract only the current user input from Hermes hook payloads."""
@@ -206,12 +319,48 @@ class PiiScanCapability(AgentSecCoreCapability):
             return "\n".join(parts)
         return ""
 
+    def _value_to_text(self, value: Any) -> str:
+        """Convert arbitrary hook values into scan text."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
+        except (TypeError, ValueError):
+            return str(value)
+
     def _cache_key(self, values: dict[str, Any]) -> str | None:
         """Return the best available Hermes turn/session correlation key."""
-        for key in ("session_id", "task_id", "run_id"):
+        runtime_session_id = self._runtime_session_id()
+        if runtime_session_id is not None:
+            return f"session_id:{runtime_session_id}"
+
+        for key in _CONTEXT_KEY_FIELDS:
             value = values.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return f"{key}:{value.strip()}"
+        return None
+
+    @staticmethod
+    def _runtime_session_id() -> str | None:
+        try:
+            from gateway.session_context import get_session_env
+        except Exception:
+            return None
+
+        try:
+            value = get_session_env(_HERMES_SESSION_ENV, "")
+        except Exception:
+            return None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         return None
 
     def _push_warning(self, cache_key: str, warning: str) -> None:

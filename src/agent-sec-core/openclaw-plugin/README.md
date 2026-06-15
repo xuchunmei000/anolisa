@@ -30,7 +30,7 @@ openclaw-plugin/
 │   │   ├── skill-ledger.ts     #   before_tool_call hook
 │   │   ├── code-scan.ts        #   before_tool_call hook
 │   │   ├── prompt-scan.ts      #   before_dispatch hook
-│   │   ├── pii-scan.ts         #   before_dispatch hook
+│   │   ├── pii-scan.ts         #   PII hooks
 │   │   └── observability.ts    #   observability hook registration
 │   └── helpers/                # Capability support code
 │       └── observability/      #   OpenClaw → agent-sec observability adapter
@@ -232,7 +232,7 @@ AGENT_SEC_LIVE=1 npm run smoke
 
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
-| `pii-scan-user-input` | `before_dispatch` | 200 | Scans inbound user text for PII/credentials before prompt-scan and optionally blocks on `deny` |
+| `pii-scan-user-input` | `before_dispatch`, `before_tool_call`, `after_tool_call`, `llm_output` | 200 before dispatch/tool call | Scans user text, tool parameters, tool output, and model output for PII/credentials; optionally blocks pre-execution `deny` verdicts |
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks skill integrity when SKILL.md is read and optionally asks on risky states |
@@ -250,9 +250,9 @@ openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval tru
 
 ### Configuring `pii-scan-user-input`
 
-The `pii-scan-user-input` capability scans the current inbound user text in `before_dispatch`, preferring `event.content` and falling back to `event.body`. It intentionally does not scan assembled prompt history, tool results, memory, or RAG context, so older PII does not trigger repeated warnings on later turns.
+The `pii-scan-user-input` capability scans the current inbound user text in `before_dispatch`, tool parameters in `before_tool_call`, tool results/errors in `after_tool_call`, and assistant text in `llm_output`. It intentionally does not scan assembled prompt history, memory, or RAG context, so older PII does not trigger repeated warnings on later turns.
 
-By default, `capabilities["pii-scan-user-input"].enableBlock` is `false`, so `warn` and `deny` verdicts are logged and the turn continues. Set `enableBlock: true` to block `deny` verdicts before prompt-scan runs by returning `{ handled: true, text }`. `warn` verdicts are always logged only. The block text uses redacted evidence and never includes raw PII values.
+By default, `capabilities["pii-scan-user-input"].enableBlock` is `false`, so `warn` and `deny` verdicts are logged and execution continues. Set `enableBlock: true` to block pre-execution `deny` verdicts: user input returns `{ handled: true, text }`, and tool parameters return `{ block: true, blockReason }`. Tool output and model output findings are warning-only. Warning and block text use redacted evidence and never include raw PII values.
 
 ### Configuring `observability`
 
