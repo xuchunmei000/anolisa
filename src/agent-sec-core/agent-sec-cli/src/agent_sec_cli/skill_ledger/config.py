@@ -5,6 +5,21 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from agent_sec_cli.skill_ledger.activation_policy import (
+    ACTIVATION_POLICIES as ACTIVATION_POLICIES,
+)
+from agent_sec_cli.skill_ledger.activation_policy import (
+    ACTIVATION_POLICY_LATEST_SCANNED as ACTIVATION_POLICY_LATEST_SCANNED,
+)
+from agent_sec_cli.skill_ledger.activation_policy import (
+    ACTIVATION_POLICY_PASS_ONLY as ACTIVATION_POLICY_PASS_ONLY,
+)
+from agent_sec_cli.skill_ledger.activation_policy import (
+    DEFAULT_ACTIVATION_POLICY as DEFAULT_ACTIVATION_POLICY,
+)
+from agent_sec_cli.skill_ledger.activation_policy import (
+    validate_activation_policy,
+)
 from agent_sec_cli.skill_ledger.errors import ConfigError
 from agent_sec_cli.skill_ledger.paths import get_config_dir
 from agent_sec_cli.skill_ledger.scanner.names import (
@@ -17,12 +32,6 @@ logger = logging.getLogger(__name__)
 
 _SKILL_MANIFEST = "SKILL.md"
 _DEPRECATED_SKILL_DIRS_KEY = "skillDirs"
-ACTIVATION_POLICY_PASS_ONLY = "pass_only"
-ACTIVATION_POLICY_LATEST_SCANNED = "latest_scanned"
-DEFAULT_ACTIVATION_POLICY = ACTIVATION_POLICY_PASS_ONLY
-ACTIVATION_POLICIES = frozenset(
-    {ACTIVATION_POLICY_PASS_ONLY, ACTIVATION_POLICY_LATEST_SCANNED}
-)
 DEFAULT_SKILL_DIRS = [
     "~/.openclaw/skills/*",
     "~/.copilot-shell/skills/*",
@@ -162,10 +171,10 @@ def resolve_activation_policy(config: dict[str, Any] | None = None) -> str:
     if config is None:
         config = load_config()
     policy = config.get("activationPolicy", DEFAULT_ACTIVATION_POLICY)
-    if not isinstance(policy, str) or policy not in ACTIVATION_POLICIES:
-        allowed = ", ".join(sorted(ACTIVATION_POLICIES))
-        raise ConfigError(f"activationPolicy must be one of: {allowed}")
-    return policy
+    try:
+        return validate_activation_policy(policy)
+    except ValueError as exc:
+        raise ConfigError(f"Invalid activationPolicy: {exc}") from exc
 
 
 def resolve_skill_dirs(config: dict[str, Any] | None = None) -> list[Path]:

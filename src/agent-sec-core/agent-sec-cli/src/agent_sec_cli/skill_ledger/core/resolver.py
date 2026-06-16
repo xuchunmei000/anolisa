@@ -15,11 +15,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from agent_sec_cli.skill_ledger.config import (
-    ACTIVATION_POLICIES,
-    ACTIVATION_POLICY_LATEST_SCANNED,
+from agent_sec_cli.skill_ledger.activation_policy import (
     ACTIVATION_POLICY_PASS_ONLY,
     DEFAULT_ACTIVATION_POLICY,
+    allowed_scan_statuses_for_policy,
+    validate_activation_policy,
 )
 from agent_sec_cli.skill_ledger.core.checker import check
 from agent_sec_cli.skill_ledger.core.file_hasher import (
@@ -44,11 +44,6 @@ from agent_sec_cli.skill_ledger.utils import validate_skill_dir
 SCHEMA_VERSION = 1
 ACTIVATION_JSON = "activation.json"
 ACTIVATION_XATTR = "user.agent_sec.skill_ledger.activation"
-
-_POLICY_ALLOWED_SCAN_STATUSES = {
-    ACTIVATION_POLICY_PASS_ONLY: frozenset({"pass"}),
-    ACTIVATION_POLICY_LATEST_SCANNED: frozenset({"pass", "warn", "deny"}),
-}
 
 
 def activation_json_path(skill_dir: str | Path) -> Path:
@@ -80,11 +75,7 @@ def resolve_activation(
     ``pass``, ``warn``, or ``deny``. Current source workspace changes never
     become runtime-readable until scan/certify creates a snapshot.
     """
-    if not isinstance(policy, str) or policy not in ACTIVATION_POLICIES:
-        allowed = ", ".join(sorted(ACTIVATION_POLICIES))
-        raise ValueError(
-            f"unsupported activation policy: {policy}; expected one of: {allowed}"
-        )
+    policy = validate_activation_policy(policy)
 
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
@@ -123,7 +114,7 @@ def find_latest_pass_snapshot(
     skill_dir: str | Path,
     backend: SigningBackend,
 ) -> tuple[str, str] | None:
-    """Return ``(version_id, target)`` for the newest valid pass snapshot."""
+    """Compatibility shim for the ``pass_only`` activation policy."""
     return find_latest_activation_snapshot(
         skill_dir,
         backend,
@@ -138,14 +129,7 @@ def find_latest_activation_snapshot(
     policy: str,
 ) -> tuple[str, str] | None:
     """Return ``(version_id, target)`` for the newest snapshot allowed by policy."""
-    allowed_statuses = (
-        _POLICY_ALLOWED_SCAN_STATUSES.get(policy) if isinstance(policy, str) else None
-    )
-    if allowed_statuses is None:
-        allowed = ", ".join(sorted(_POLICY_ALLOWED_SCAN_STATUSES))
-        raise ValueError(
-            f"unsupported activation policy: {policy}; expected one of: {allowed}"
-        )
+    allowed_statuses = allowed_scan_statuses_for_policy(policy)
     for version_id in reversed(list_version_ids(skill_dir)):
         try:
             manifest = load_version_manifest(skill_dir, version_id)
