@@ -752,6 +752,36 @@ jobs:
           cd src/ws-ckpt/src
           cargo test --workspace
 
+      # ── Rust coverage gate ──────────────────────────────────────────────
+      - name: Rust coverage gate (≥45%)
+        run: |
+          cargo install cargo-tarpaulin --locked
+          cd src/ws-ckpt/src
+          cargo tarpaulin --workspace --out Stdout --fail-under 45
+
+      # ── Plugin tests + coverage gates ───────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: OpenClaw plugin coverage gate (≥90%)
+        working-directory: src/ws-ckpt/src/plugins/openclaw
+        run: |
+          npm install -g npm@10.9.0
+          npm ci --registry=https://registry.npmmirror.com --replace-registry-host=always
+          ./node_modules/.bin/vitest run --coverage
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Hermes plugin coverage gate (≥90%)
+        run: |
+          pip install pytest pytest-cov pyyaml
+          cd src/ws-ckpt/src/plugins
+          python -m pytest hermes/tests/ --cov=hermes --cov-report=term --cov-fail-under=90
+
+
   # =========================================================================
   # Step 8: Test agent-memory (Linux-only Rust crate)
   # =========================================================================
