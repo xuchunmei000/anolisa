@@ -776,14 +776,19 @@ def test_check_tampered_writes_security_event(ws):
 
     r = run_skill_ledger(["check", str(skill)], env_extra=env)
     assert r.returncode == 1
+    out = parse_json_output(r.stdout)
     events = read_security_events(event_data)
     reset_security_event_writers()
-    assert any(
-        event["category"] == "skill_ledger"
-        and event["details"]["result"].get("command") == "check"
-        and event["details"]["result"].get("status") == "tampered"
+    check_event = next(
+        event
         for event in events
+        if event["category"] == "skill_ledger"
+        and event["details"]["result"].get("command") == "check"
     )
+    event_result = check_event["details"]["result"]
+    assert event_result["status"] == "tampered"
+    assert event_result["skill_name"] == out["skillName"]
+    assert event_result["version_id"] == out["versionId"]
 
 
 def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
@@ -828,12 +833,16 @@ def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
 
     events = read_security_events(event_data)
     reset_security_event_writers()
-    assert any(
-        event["details"]["result"].get("command") == "scan"
-        and event["details"]["result"].get("auditEvents", [{}])[0].get("type")
-        == "tampered_recovered"
+    scan_event_result = next(
+        event["details"]["result"]
         for event in events
+        if event["details"]["result"].get("command") == "scan"
+        and event["details"]["result"].get("audit_events", [{}])[0].get("type")
+        == "tampered_recovered"
     )
+    assert scan_event_result["verdict"] == out["scanStatus"]
+    assert scan_event_result["version_id"] == out["versionId"]
+    assert scan_event_result["audit_events"][0]["to_status"] == out["scanStatus"]
 
 
 def test_certify_recovers_tampered_latest_with_audit_event(ws):
@@ -876,12 +885,15 @@ def test_certify_recovers_tampered_latest_with_audit_event(ws):
 
     events = read_security_events(event_data)
     reset_security_event_writers()
-    assert any(
-        event["details"]["result"].get("command") == "certify"
-        and event["details"]["result"].get("auditEvents", [{}])[0].get("type")
-        == "tampered_recovered"
+    certify_event_result = next(
+        event["details"]["result"]
         for event in events
+        if event["details"]["result"].get("command") == "certify"
+        and event["details"]["result"].get("audit_events", [{}])[0].get("type")
+        == "tampered_recovered"
     )
+    assert certify_event_result["verdict"] == out["scanStatus"]
+    assert certify_event_result["audit_events"][0]["to_status"] == out["scanStatus"]
 
 
 def test_check_deny_exit_code_1(ws):

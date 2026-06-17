@@ -1431,6 +1431,23 @@ class TestSkillLedgerSummary:
         output = format_summary(events, "last 24 hours")
         assert "Certifications:   2 (pass: 1, warn: 1)" in output
 
+    def test_certification_counts_accept_event_verdict(self):
+        events = [
+            _make_skill_ledger_event(
+                "certify",
+                result_extra={"verdict": "pass", "version_id": "v000001"},
+                minutes_ago=1,
+            ),
+            _make_skill_ledger_event(
+                "certify",
+                result_extra={"verdict": "warn", "version_id": "v000001"},
+                skill_dir="/opt/skills/b",
+                minutes_ago=2,
+            ),
+        ]
+        output = format_summary(events, "last 24 hours")
+        assert "Certifications:   2 (pass: 1, warn: 1)" in output
+
     def test_status_distribution(self):
         events = [
             _make_skill_ledger_event(

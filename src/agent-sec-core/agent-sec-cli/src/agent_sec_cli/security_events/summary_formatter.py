@@ -447,7 +447,8 @@ def _summarize_skill_ledger(events: list[SecurityEvent]) -> str:
         scan_status_counts: dict[str, int] = defaultdict(int)
         for e in certifications:
             if e.result == "succeeded":
-                ss = _get_result(e).get("scanStatus", "unknown")
+                result = _get_result(e)
+                ss = result.get("verdict", result.get("scanStatus", "unknown"))
                 scan_status_counts[ss] += 1
         parts = [f"{s}: {c}" for s, c in sorted(scan_status_counts.items())]
         lines.append(f"  Certifications:   {cert_ok} ({', '.join(parts)})")

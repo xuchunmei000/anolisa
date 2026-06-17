@@ -6,6 +6,7 @@ unified :class:`ActionResult`.
 
 import copy
 import json
+import re
 from typing import Any
 
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
@@ -38,6 +39,46 @@ _PASSPHRASE_EXISTING_KEY_ERROR = (
     "'agent-sec-cli skill-ledger init --force-keys --passphrase' to rotate it "
     "with passphrase protection."
 )
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def _to_snake_case(value: str) -> str:
+    """Convert a JSON field name from camelCase/PascalCase to snake_case."""
+    return _CAMEL_BOUNDARY_RE.sub("_", value).lower()
+
+
+def _snake_case_event_keys(value: Any) -> Any:
+    """Return *value* with Skill Ledger event result keys normalized.
+
+    Scanner finding ``metadata`` is intentionally opaque because its contents are
+    scanner-owned rather than part of the Skill Ledger event contract.
+    """
+    if isinstance(value, list):
+        return [_snake_case_event_keys(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    normalized: dict[str, Any] = {}
+    scan_status: Any = None
+    has_scan_status = False
+    for key, item in value.items():
+        if key == "metadata":
+            normalized[key] = copy.deepcopy(item)
+            continue
+        if key == "scanStatus":
+            scan_status = item
+            has_scan_status = True
+            continue
+        normalized[_to_snake_case(key)] = _snake_case_event_keys(item)
+
+    if has_scan_status:
+        normalized["verdict"] = scan_status
+    return normalized
+
+
+def _normalize_event_result(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the Skill Ledger event-only result payload."""
+    return _snake_case_event_keys(data)
 
 
 class SkillLedgerBackend(BaseBackend):
@@ -55,9 +96,10 @@ class SkillLedgerBackend(BaseBackend):
         self, result: ActionResult, kwargs: dict[str, Any]
     ) -> dict[str, Any]:
         """Build skill-ledger audit details without logging key passphrases."""
+        result_data = copy.deepcopy(result.data)
         return {
             "request": self._sanitize_request(kwargs),
-            "result": copy.deepcopy(result.data),
+            "result": _normalize_event_result(result_data),
         }
 
     def build_error_details(
