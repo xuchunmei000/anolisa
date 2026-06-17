@@ -1725,7 +1725,7 @@ def test_resolve_without_writing_reports_stable_xattr_status(ws):
 
 
 def test_resolve_warn_latest_falls_back_to_previous_pass_snapshot(ws):
-    """default pass_only policy does not activate warn snapshots."""
+    """Explicit pass_only policy does not activate warn snapshots."""
     skill = make_skill(ws.skills_dir, "resolve-warn", {"data.txt": "v1"})
     env = ws.env()
     pass_findings = write_findings_file(
@@ -1746,7 +1746,7 @@ def test_resolve_warn_latest_falls_back_to_previous_pass_snapshot(ws):
         ["certify", str(skill), "--findings", str(warn_findings)], env_extra=env
     )
 
-    out = resolve_skill_activation(skill, env)
+    out = resolve_skill_activation(skill, env, policy="pass_only")
 
     assert out["status"] == "warn"
     assert out["activeVersionId"] == "v000001"
@@ -1786,6 +1786,39 @@ def test_resolve_latest_scanned_activates_warn_snapshot(ws):
     }
 
 
+def test_resolve_pass_warn_only_activates_warn_snapshot(ws):
+    """pass_warn_only policy may activate the newest valid warn snapshot."""
+    skill = make_skill(ws.skills_dir, "resolve-pass-warn-warn", {"data.txt": "v1"})
+    env = ws.env()
+    pass_findings = write_findings_file(
+        ws.fixtures,
+        "resolve-pass-warn-warn-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    warn_findings = write_findings_file(
+        ws.fixtures,
+        "resolve-pass-warn-warn-warn.json",
+        [{"rule": "warn", "level": "warn", "message": "warning"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(pass_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 warning")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(warn_findings)], env_extra=env
+    )
+
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
+
+    assert out["status"] == "warn"
+    assert out["activeVersionId"] == "v000002"
+    assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": ".skill-meta/versions/v000002.snapshot",
+    }
+
+
 def test_resolve_latest_scanned_activates_deny_snapshot(ws):
     """latest_scanned policy may activate the newest valid deny snapshot."""
     skill = make_skill(ws.skills_dir, "resolve-latest-deny", {"data.txt": "v1"})
@@ -1813,6 +1846,60 @@ def test_resolve_latest_scanned_activates_deny_snapshot(ws):
     assert out["status"] == "deny"
     assert out["activeVersionId"] == "v000002"
     assert out["target"] == ".skill-meta/versions/v000002.snapshot"
+
+
+def test_resolve_pass_warn_only_skips_deny_snapshot(ws):
+    """pass_warn_only skips deny snapshots and falls back to pass/warn history."""
+    skill = make_skill(ws.skills_dir, "resolve-pass-warn-deny", {"data.txt": "v1"})
+    env = ws.env()
+    warn_findings = write_findings_file(
+        ws.fixtures,
+        "resolve-pass-warn-deny-warn.json",
+        [{"rule": "warn", "level": "warn", "message": "warning"}],
+    )
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "resolve-pass-warn-deny-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(warn_findings)], env_extra=env
+    )
+    (skill / "data.txt").write_text("v2 deny")
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
+
+    assert out["status"] == "deny"
+    assert out["activeVersionId"] == "v000001"
+    assert out["target"] == ".skill-meta/versions/v000001.snapshot"
+    assert read_activation(skill) == {
+        "schemaVersion": 1,
+        "target": ".skill-meta/versions/v000001.snapshot",
+    }
+
+
+def test_resolve_pass_warn_only_returns_null_without_pass_or_warn_snapshot(ws):
+    """pass_warn_only writes target null when only deny history exists."""
+    skill = make_skill(ws.skills_dir, "resolve-pass-warn-only-deny", {"data.txt": "v1"})
+    env = ws.env()
+    deny_findings = write_findings_file(
+        ws.fixtures,
+        "resolve-pass-warn-only-deny.json",
+        [{"rule": "deny", "level": "deny", "message": "deny"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(deny_findings)], env_extra=env
+    )
+
+    out = resolve_skill_activation(skill, env, policy="pass_warn_only")
+
+    assert out["status"] == "deny"
+    assert out["activeVersionId"] is None
+    assert out["target"] is None
+    assert read_activation(skill) == {"schemaVersion": 1, "target": None}
 
 
 def test_resolve_latest_scanned_excludes_none_snapshot(ws):

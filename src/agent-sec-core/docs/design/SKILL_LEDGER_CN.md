@@ -188,7 +188,7 @@ class SigningBackend(Protocol):
 ```jsonc
 {
   "signingBackend": "ed25519",  // 当前实现固定使用 ed25519；该字段保留给未来扩展
-  "activationPolicy": "pass_only", // pass_only | latest_scanned
+  "activationPolicy": "latest_scanned", // pass_only | pass_warn_only | latest_scanned
   "enableDefaultSkillDirs": true,   // 默认 true；false 时仅使用 managedSkillDirs
   "managedSkillDirs": [
     "/opt/custom-skills/*",         // glob 匹配目录下所有 skill
@@ -387,6 +387,7 @@ Skill Ledger 不提供面向用户或 SkillFS 的 `resolve` CLI；activation ref
 | policy | 激活规则 |
 |--------|----------|
 | `pass_only` | 只激活签名有效、manifest hash 有效、snapshot 完整、`scanStatus=pass` 的最新 snapshot。 |
+| `pass_warn_only` | 激活签名有效、manifest hash 有效、snapshot 完整、且 `scanStatus in {"pass","warn"}` 的最新 snapshot；`deny` snapshot 会被跳过。 |
 | `latest_scanned` | 激活签名有效、manifest hash 有效、snapshot 完整、且 `scanStatus in {"pass","warn","deny"}` 的最新 snapshot。 |
 
 `latest_scanned` 中的最新版本仍然是 latest signed snapshot，不是 source/current 工作区；`scanStatus=none` 不会被激活。若没有符合策略的版本，则写入：
@@ -400,7 +401,9 @@ Skill Ledger 不提供面向用户或 SkillFS 的 `resolve` CLI；activation ref
 
 resolver 始终只激活 snapshot，不激活 source/current 工作区。当前工作区处于
 `drifted`、`tampered` 或尚未扫描的 `none` 状态时，不会被直接暴露；是否暴露
-历史 `warn` / `deny` snapshot 由 `activationPolicy` 决定。daemon 在收到 SkillFS
+历史 `warn` / `deny` snapshot 由 `activationPolicy` 决定。`pass_warn_only` 会暴露
+`warn` 历史 snapshot，但在最新版本为 `deny` 时回退到更早的 `pass` / `warn`
+snapshot；若没有符合策略的版本则写入 `target: null`。daemon 在收到 SkillFS
 变更通知、扫描完成或重启 reconcile 时调用该 resolver。
 
 **`skill-ledger set-policy <skill_dir> --policy <allow|block|warning>`** — 设置 skill 执行策略（预留接口）

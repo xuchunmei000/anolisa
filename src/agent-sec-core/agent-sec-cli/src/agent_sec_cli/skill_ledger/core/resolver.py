@@ -71,9 +71,11 @@ def resolve_activation(
     """Resolve and optionally persist the runtime activation target.
 
     ``pass_only`` activates only signed ``scanStatus=pass`` versions.
-    ``latest_scanned`` activates the latest signed scanned snapshot, including
-    ``pass``, ``warn``, or ``deny``. Current source workspace changes never
-    become runtime-readable until scan/certify creates a snapshot.
+    ``pass_warn_only`` activates signed ``scanStatus=pass`` or ``warn`` versions,
+    but skips ``deny`` snapshots. ``latest_scanned`` activates the latest signed
+    scanned snapshot, including ``pass``, ``warn``, or ``deny``. Current source
+    workspace changes never become runtime-readable until scan/certify creates a
+    snapshot.
     """
     policy = validate_activation_policy(policy)
 

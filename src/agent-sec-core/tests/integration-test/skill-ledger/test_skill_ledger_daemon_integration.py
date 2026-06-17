@@ -1,6 +1,7 @@
 """Integration tests for Skill Ledger daemon activation refresh."""
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,15 @@ def read_skill_ledger_config(root: Path) -> dict[str, Any]:
     return json.loads(
         (root / "xdg_config" / "agent-sec" / "skill-ledger" / "config.json").read_text()
     )
+
+
+def daemon_socket_path(tmp_path: Path) -> Path:
+    """Return a short Unix socket path for AF_UNIX path limits."""
+    digest = hashlib.sha1(str(tmp_path).encode("utf-8")).hexdigest()[:10]
+    runtime = Path("/tmp") / f"asl-{digest}"  # noqa: S108
+    runtime.mkdir(parents=True, exist_ok=True)
+    runtime.chmod(0o700)
+    return runtime / "d.sock"
 
 
 async def wait_for(
@@ -91,7 +101,7 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -142,7 +152,7 @@ def test_daemon_metadata_only_notify_does_not_change_activation(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -190,7 +200,7 @@ def test_daemon_notify_updates_activation_after_safe_drift(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -236,12 +246,15 @@ def test_daemon_notify_updates_activation_after_safe_drift(
     assert activation_v2["target"] == ".skill-meta/versions/v000002.snapshot"
 
 
-def test_daemon_notify_falls_back_after_risky_scan(monkeypatch, tmp_path: Path):
+def test_daemon_default_latest_scanned_policy_activates_risky_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path)
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -281,7 +294,8 @@ def test_daemon_notify_falls_back_after_risky_scan(monkeypatch, tmp_path: Path):
                 lambda: (
                     read_activation(skill_dir)
                     if read_latest(skill_dir).get("versionId") == "v000002"
-                    and read_latest(skill_dir).get("scanStatus") != "pass"
+                    and read_activation(skill_dir).get("target")
+                    == ".skill-meta/versions/v000002.snapshot"
                     else None
                 )
             )
@@ -295,7 +309,7 @@ def test_daemon_notify_falls_back_after_risky_scan(monkeypatch, tmp_path: Path):
     assert activation_v1["target"] == ".skill-meta/versions/v000001.snapshot"
     assert latest["versionId"] == "v000002"
     assert latest["scanStatus"] in {"warn", "deny"}
-    assert activation_after_risk["target"] == ".skill-meta/versions/v000001.snapshot"
+    assert activation_after_risk["target"] == ".skill-meta/versions/v000002.snapshot"
 
 
 def test_daemon_latest_scanned_policy_activates_risky_snapshot(
@@ -306,7 +320,7 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path, {"activationPolicy": "latest_scanned"})
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -363,12 +377,92 @@ def test_daemon_latest_scanned_policy_activates_risky_snapshot(
     assert activation_after_risk["target"] == ".skill-meta/versions/v000002.snapshot"
 
 
+def test_daemon_pass_warn_only_policy_hides_deny_snapshot(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path, {"activationPolicy": "pass_warn_only"})
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
+    socket_path = daemon_socket_path(tmp_path)
+    scans = {"count": 0}
+
+    def fake_scan(skill_path: str, backend: Any) -> dict[str, Any]:
+        from agent_sec_cli.skill_ledger.core.certifier import (  # noqa: PLC0415
+            certify,
+        )
+
+        scans["count"] += 1
+        level = "warn" if scans["count"] == 1 else "deny"
+        findings_path = tmp_path / f"daemon-pass-warn-{level}.json"
+        findings_path.write_text(
+            json.dumps([{"rule": level, "level": level, "message": level}]),
+            encoding="utf-8",
+        )
+        return certify(skill_path, backend, findings_path=str(findings_path))
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        fake_scan,
+    )
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                notify_payload(skill_dir),
+                request_id="notify-warn-v1",
+            )
+            activation_v1 = await wait_for(
+                lambda: (
+                    read_activation(skill_dir)
+                    if (skill_dir / ".skill-meta" / "activation.json").is_file()
+                    and read_activation(skill_dir).get("target")
+                    == ".skill-meta/versions/v000001.snapshot"
+                    else None
+                )
+            )
+
+            (skill_dir / "run.sh").write_text("echo deny\n", encoding="utf-8")
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                notify_payload(skill_dir, ["run.sh"]),
+                request_id="notify-deny-v2",
+            )
+            activation_after_deny = await wait_for(
+                lambda: (
+                    read_activation(skill_dir)
+                    if read_latest(skill_dir).get("versionId") == "v000002"
+                    and read_activation(skill_dir).get("target")
+                    == ".skill-meta/versions/v000001.snapshot"
+                    else None
+                )
+            )
+            latest = read_latest(skill_dir)
+        finally:
+            await server.stop()
+        return activation_v1, activation_after_deny, latest
+
+    activation_v1, activation_after_deny, latest = asyncio.run(scenario())
+
+    assert activation_v1["target"] == ".skill-meta/versions/v000001.snapshot"
+    assert latest["versionId"] == "v000002"
+    assert latest["scanStatus"] == "deny"
+    assert activation_after_deny["target"] == ".skill-meta/versions/v000001.snapshot"
+
+
 def test_daemon_invalid_activation_policy_sets_job_error(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
     write_isolated_config(tmp_path, {"activationPolicy": "invalid"})
     skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
@@ -426,7 +520,7 @@ def test_daemon_startup_reconciles_managed_skill(monkeypatch, tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    socket_path = tmp_path / "runtime" / "daemon.sock"
+    socket_path = daemon_socket_path(tmp_path)
 
     async def scenario():
         server = DaemonServer(socket_path=socket_path)
