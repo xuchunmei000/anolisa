@@ -40,7 +40,6 @@ def request_for(skill_dir: Path, **overrides: Any) -> DaemonRequest:
     }
     params.update(overrides)
     return DaemonRequest(
-        id="req-skillfs",
         method=METHOD_SKILLFS_NOTIFY_CHANGE,
         params=params,
     )
