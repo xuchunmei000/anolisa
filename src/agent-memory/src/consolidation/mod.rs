@@ -7,6 +7,7 @@
 pub mod episode;
 pub mod fact;
 pub mod heuristics;
+pub mod quality;
 pub mod writer;
 
 pub use episode::{Episode, extract_episodes};
