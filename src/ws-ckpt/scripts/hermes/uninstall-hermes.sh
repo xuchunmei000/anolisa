@@ -28,7 +28,6 @@ fi
 
 if [ -n "$HERMES_BIN" ] && [ -x "$HERMES_BIN" ]; then
     HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins disable ws-ckpt 2>/dev/null || true
-    HERMES_HOME="${HERMES_HOME%/}" "$HERMES_BIN" plugins remove ws-ckpt 2>/dev/null || true
 fi
 
 # 1. Remove plugin symlink

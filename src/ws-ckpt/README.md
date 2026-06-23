@@ -149,14 +149,15 @@ ws-ckpt reload
 | `status` | 查看守护进程和工作区状态 |
 | `config` | 查看或修改 daemon 配置（写入 `/etc/ws-ckpt/config.toml`） |
 | `reload` | 通知 daemon 重新加载 `config.toml` |
+| `plugin` | 安装/卸载 ws-ckpt Agent runtime（openclaw/hermes）插件 |
 
 ## 组件
 
 | 组件 | 状态 | 说明 |
 |------|------|------|
 | Daemon | 基本完成 | 在 root 权限在运行，实际操作文件系统 |
-| CLI | 基本完成 | init / checkpoint / rollback / delete / list / diff / cleanup / status / config |
-| plugin | 待实现 | OpenClaw 插件，自动 checkpoint/rollback |
+| CLI | 基本完成 | init / checkpoint / rollback / delete / list / diff / cleanup / status / config / plugin |
+| plugin | 基本完成 | OpenClaw / Hermes 插件，自动 checkpoint/rollback |
 | skills | 初版 | `src/skills/ws-ckpt/SKILL.md` 初版完成，目前仅适配openclaw |
 
 ## OpenClaw Skill

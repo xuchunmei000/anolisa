@@ -271,6 +271,34 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+
+    /// Install or uninstall the ws-ckpt plugin for an agent runtime
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PluginAction {
+    /// Install the ws-ckpt plugin into an agent runtime
+    Install {
+        /// Target runtime
+        #[arg(long, short, default_value = "openclaw")]
+        runtime: PluginRuntime,
+    },
+    /// Uninstall the ws-ckpt plugin from an agent runtime
+    Uninstall {
+        /// Target runtime
+        #[arg(long, short, default_value = "openclaw")]
+        runtime: PluginRuntime,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum PluginRuntime {
+    Openclaw,
+    Hermes,
 }
 
 #[tokio::main]
@@ -492,6 +520,9 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             handle_recover(workspace, all, force).await?;
         }
+        Commands::Plugin { action } => {
+            handle_plugin(action)?;
+        }
     }
     Ok(())
 }
@@ -533,6 +564,71 @@ fn generate_auto_id() -> String {
     chrono::Utc::now()
         .format("ckpt-%Y%m%dT%H%M%S%.3f")
         .to_string()
+}
+
+fn handle_plugin(action: PluginAction) -> Result<()> {
+    let (runtime, runtime_dir) = match &action {
+        PluginAction::Install { runtime } | PluginAction::Uninstall { runtime } => match runtime {
+            PluginRuntime::Openclaw => (runtime, "openclaw"),
+            PluginRuntime::Hermes => (runtime, "hermes"),
+        },
+    };
+
+    let adapter_dir = PathBuf::from("/usr/share/anolisa/adapters/ws-ckpt").join(runtime_dir);
+
+    if let PluginAction::Install { .. } = &action {
+        let detect_script = adapter_dir.join(format!("detect-{runtime_dir}.sh"));
+        if !detect_script.is_file() {
+            anyhow::bail!(
+                "cannot find {}; is ws-ckpt installed?",
+                detect_script.display()
+            );
+        }
+        let detect_code = std::process::Command::new("bash")
+            .arg(&detect_script)
+            .status()
+            .with_context(|| format!("failed to run {}", detect_script.display()))?
+            .code()
+            .unwrap_or(-1);
+        match detect_code {
+            0 => {
+                eprintln!("{runtime_dir} plugin already installed");
+                return Ok(());
+            }
+            1 => {}
+            2 => anyhow::bail!("missing prerequisites for {runtime:?}"),
+            _ => anyhow::bail!("detect failed for {runtime:?} (exit {detect_code})"),
+        }
+    }
+
+    let action_script = match &action {
+        PluginAction::Install { .. } => format!("install-{runtime_dir}.sh"),
+        PluginAction::Uninstall { .. } => format!("uninstall-{runtime_dir}.sh"),
+    };
+    let script_path = adapter_dir.join(&action_script);
+    if !script_path.is_file() {
+        anyhow::bail!(
+            "cannot find {}; is ws-ckpt installed?",
+            script_path.display()
+        );
+    }
+
+    let status = std::process::Command::new("bash")
+        .arg(&script_path)
+        .status()
+        .with_context(|| format!("failed to run {}", script_path.display()))?;
+
+    if !status.success() {
+        let verb = match action {
+            PluginAction::Install { .. } => "install",
+            PluginAction::Uninstall { .. } => "uninstall",
+        };
+        anyhow::bail!(
+            "{verb} failed for {runtime:?} (exit {})",
+            status.code().unwrap_or(-1)
+        );
+    }
+    Ok(())
 }
 
 /// Resolve workspace identifier: convert filesystem paths to absolute,

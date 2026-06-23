@@ -271,6 +271,33 @@ ws-ckpt config -w ~/proj --reset
 ws-ckpt reload        # 等价于 systemctl reload ws-ckpt
 ```
 
+### 2.10 插件管理
+
+安装或卸载 ws-ckpt 的 Agent runtime 插件（OpenClaw / Hermes）。
+
+```bash
+ws-ckpt plugin install [--runtime openclaw|hermes]
+ws-ckpt plugin uninstall [--runtime openclaw|hermes]
+```
+
+`--runtime` 默认为 `openclaw`。
+
+```bash
+# 安装 OpenClaw 插件（默认）
+ws-ckpt plugin install
+
+# 安装 Hermes 插件
+ws-ckpt plugin install --runtime hermes
+
+# 卸载 OpenClaw 插件
+ws-ckpt plugin uninstall
+
+# 卸载 Hermes 插件
+ws-ckpt plugin uninstall --runtime hermes
+```
+
+install 会先执行 detect 脚本检查前置条件（exit 2 = 缺前置依赖，中止；exit 1 = 未安装但可安装，继续），通过后再执行 install 脚本。uninstall 直接执行卸载脚本。脚本位于 `/usr/share/anolisa/adapters/ws-ckpt/<runtime>/`。
+
 ## 典型工作流
 
 ### Agent Checkpoint/Rollback 流程
