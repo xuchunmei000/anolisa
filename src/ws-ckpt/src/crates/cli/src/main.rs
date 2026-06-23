@@ -132,8 +132,11 @@ enum Commands {
         workspace: String,
 
         /// Snapshot ID (must be unique within the workspace)
-        #[arg(long, short = 'i', value_parser = snapshot_id_value_parser())]
-        id: String,
+        #[arg(long = "snapshot", short = 's', required_unless_present = "legacy_id", conflicts_with = "legacy_id", value_parser = snapshot_id_value_parser())]
+        snapshot: Option<String>,
+
+        #[arg(long = "id", short = 'i', hide = true, value_parser = snapshot_id_value_parser())]
+        legacy_id: Option<String>,
 
         /// Commit message describing the checkpoint
         #[arg(long, short = 'm')]
@@ -324,10 +327,17 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Checkpoint {
             workspace,
-            id,
+            snapshot,
+            legacy_id,
             message,
             metadata,
         } => {
+            let id = if let Some(legacy) = legacy_id {
+                eprintln!("Warning: --id/-i is deprecated, use --snapshot/-s instead");
+                legacy
+            } else {
+                snapshot.expect("clap should require either snapshot or legacy_id")
+            };
             // Validate metadata is valid JSON if provided
             if let Some(ref s) = metadata {
                 serde_json::from_str::<serde_json::Value>(s)
@@ -1755,7 +1765,7 @@ mod tests {
         // subcommands. Tested independently for each blank value.
         let trailing: &[(&str, &[&str])] = &[
             ("init", &[]),
-            ("checkpoint", &["-i", "snap-1"]),
+            ("checkpoint", &["-s", "snap-1"]),
             ("rollback", &["-s", "snap-1"]),
             ("delete", &["-s", "snap-1"]),
             ("list", &[]),
@@ -1811,7 +1821,7 @@ mod tests {
             "checkpoint",
             "--workspace",
             "/tmp/test",
-            "--id",
+            "--snapshot",
             "msg1-step0",
             "-m",
             "save point",
@@ -1822,12 +1832,13 @@ mod tests {
         match cli.command {
             Commands::Checkpoint {
                 workspace,
-                id,
+                snapshot,
                 message,
                 metadata,
+                ..
             } => {
                 assert_eq!(workspace, "/tmp/test");
-                assert_eq!(id, "msg1-step0");
+                assert_eq!(snapshot.as_deref(), Some("msg1-step0"));
                 assert_eq!(message.as_deref(), Some("save point"));
                 assert_eq!(metadata.as_deref(), Some(r#"{"key":"value"}"#));
             }
@@ -1842,18 +1853,18 @@ mod tests {
             "checkpoint",
             "--workspace",
             "/ws",
-            "--id",
+            "--snapshot",
             "snap-1",
         ])
         .unwrap();
         match cli.command {
             Commands::Checkpoint {
-                id,
+                snapshot,
                 message,
                 metadata,
                 ..
             } => {
-                assert_eq!(id, "snap-1");
+                assert_eq!(snapshot.as_deref(), Some("snap-1"));
                 assert!(message.is_none());
                 assert!(metadata.is_none());
             }
@@ -1868,7 +1879,7 @@ mod tests {
             "checkpoint",
             "--workspace",
             "/ws",
-            "--id",
+            "--snapshot",
             "snap-1",
             "-m",
             "备注",
@@ -1885,7 +1896,7 @@ mod tests {
     #[test]
     fn parse_rejects_empty_or_whitespace_checkpoint_id() {
         for blank in ["", " ", "   ", "\t"] {
-            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", blank])
+            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-s", blank])
                 .err()
                 .unwrap_or_else(|| panic!("expected parse error for id {:?}", blank));
             assert_eq!(
@@ -1901,7 +1912,7 @@ mod tests {
     #[test]
     fn parse_rejects_checkpoint_id_with_path_separators() {
         for bad in ["foo/bar", "..", ".", "a\\b", "/abs"] {
-            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", bad])
+            let err = Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-s", bad])
                 .err()
                 .unwrap_or_else(|| panic!("expected parse error for id {:?}", bad));
             assert_eq!(
@@ -1917,9 +1928,89 @@ mod tests {
     #[test]
     fn parse_accepts_reasonable_checkpoint_ids() {
         for good in ["snap-1", "msg1-step2", "before-refactor", "v1.2.3"] {
-            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", good])
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-s", good])
                 .unwrap_or_else(|_| panic!("expected acceptance for id {:?}", good));
         }
+    }
+
+    #[test]
+    fn parse_checkpoint_accepts_snapshot_and_legacy_id_flags() {
+        // Primary: --snapshot / -s → snapshot field
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "--snapshot", "snap-1"])
+                .unwrap();
+        match &cli.command {
+            Commands::Checkpoint {
+                snapshot,
+                legacy_id,
+                ..
+            } => {
+                assert_eq!(snapshot.as_deref(), Some("snap-1"));
+                assert!(legacy_id.is_none());
+            }
+            _ => panic!("expected Checkpoint"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-s", "snap-2"]).unwrap();
+        match &cli.command {
+            Commands::Checkpoint {
+                snapshot,
+                legacy_id,
+                ..
+            } => {
+                assert_eq!(snapshot.as_deref(), Some("snap-2"));
+                assert!(legacy_id.is_none());
+            }
+            _ => panic!("expected Checkpoint"),
+        }
+
+        // Legacy alias: --id / -i → legacy_id field (still parses correctly).
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "--id", "snap-3"]).unwrap();
+        match &cli.command {
+            Commands::Checkpoint {
+                snapshot,
+                legacy_id,
+                ..
+            } => {
+                assert!(snapshot.is_none());
+                assert_eq!(legacy_id.as_deref(), Some("snap-3"));
+            }
+            _ => panic!("expected Checkpoint"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["ws-ckpt", "checkpoint", "-w", "/ws", "-i", "snap-4"]).unwrap();
+        match &cli.command {
+            Commands::Checkpoint {
+                snapshot,
+                legacy_id,
+                ..
+            } => {
+                assert!(snapshot.is_none());
+                assert_eq!(legacy_id.as_deref(), Some("snap-4"));
+            }
+            _ => panic!("expected Checkpoint"),
+        }
+    }
+
+    #[test]
+    fn parse_checkpoint_rejects_both_snapshot_and_id() {
+        let result = Cli::try_parse_from([
+            "ws-ckpt",
+            "checkpoint",
+            "-w",
+            "/ws",
+            "--snapshot",
+            "snap-1",
+            "--id",
+            "snap-2",
+        ]);
+        assert!(
+            result.is_err(),
+            "--snapshot and --id should be mutually exclusive"
+        );
     }
 
     // Cases that go through `snapshot_id_value_parser`. Each row is
@@ -2138,7 +2229,7 @@ mod tests {
 
     #[test]
     fn checkpoint_missing_workspace_fails() {
-        let result = Cli::try_parse_from(["ws-ckpt", "checkpoint", "--id", "snap-1"]);
+        let result = Cli::try_parse_from(["ws-ckpt", "checkpoint", "--snapshot", "snap-1"]);
         assert!(
             result.is_err(),
             "checkpoint without --workspace should fail"
@@ -2146,9 +2237,9 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_missing_id_fails() {
+    fn checkpoint_missing_snapshot_fails() {
         let result = Cli::try_parse_from(["ws-ckpt", "checkpoint", "--workspace", "/ws"]);
-        assert!(result.is_err(), "checkpoint without --id should fail");
+        assert!(result.is_err(), "checkpoint without --snapshot should fail");
     }
 
     #[test]
@@ -2177,7 +2268,7 @@ mod tests {
             "checkpoint",
             "--workspace",
             "/ws",
-            "--id",
+            "--snapshot",
             "snap-1",
             "--metadata",
             r#"{"key":"value"}"#,
@@ -2202,7 +2293,7 @@ mod tests {
             "checkpoint",
             "--workspace",
             "/ws",
-            "--id",
+            "--snapshot",
             "snap-1",
             "--metadata",
             "not-json",
