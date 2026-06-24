@@ -56,6 +56,19 @@ def test_parse_skillfs_change_validates_request(tmp_path: Path):
     assert change.paths == {"SKILL.md"}
 
 
+def test_parse_skillfs_change_accepts_reconcile_with_empty_paths(tmp_path: Path):
+    skill_dir = make_skill(tmp_path, "weather")
+
+    change = parse_skillfs_change(
+        request_for(skill_dir, eventKind="reconcile", paths=[]).params
+    )
+
+    assert change.skill_dir == skill_dir.resolve()
+    assert change.skill_name == "weather"
+    assert change.event_kinds == {"reconcile"}
+    assert change.paths == set()
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -132,6 +145,38 @@ def test_notify_enqueues_registered_activation_job(monkeypatch, tmp_path: Path):
     assert response.data["skill"]["skillName"] == "weather"
 
 
+def test_notify_enqueues_reconcile_with_empty_paths(monkeypatch, tmp_path: Path):
+    skill_dir = make_skill(tmp_path, "weather")
+    runtime = DaemonRuntime(socket_path=tmp_path / "daemon.sock")
+    job = SkillLedgerActivationJob(debounce_seconds=0)
+    runtime.jobs.register(job)
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._resolve_managed_skill_dirs",
+        lambda: [],
+    )
+
+    async def scenario():
+        await job.start()
+        try:
+            response = skillfs_notify_change_handler(
+                request_for(skill_dir, eventKind="reconcile", paths=[]),
+                runtime,
+            )
+        finally:
+            await job.stop()
+        return response
+
+    response = asyncio.run(scenario())
+
+    assert response.data["schemaVersion"] == 1
+    assert response.data["accepted"] is True
+    assert response.data["ignored"] is False
+    assert response.data["queued"] is True
+    assert response.data["coalesced"] is False
+    assert response.data["skill"]["eventKinds"] == ["reconcile"]
+    assert response.data["skill"]["paths"] == []
+
+
 def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
     skill_dir = make_skill(tmp_path, "weather")
     calls = []
@@ -170,6 +215,14 @@ def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
                     paths={"scripts/run.sh"},
                 )
             )
+            job.enqueue(
+                SkillFsChange(
+                    skill_dir=skill_dir.resolve(),
+                    skill_name=skill_dir.name,
+                    event_kinds={"reconcile"},
+                    paths=set(),
+                )
+            )
             deadline = asyncio.get_running_loop().time() + 1.0
             while len(calls) < 1 and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.01)
@@ -179,7 +232,7 @@ def test_activation_job_debounces_same_skill(monkeypatch, tmp_path: Path):
     asyncio.run(scenario())
 
     assert len(calls) == 1
-    assert calls[0].event_kinds == {"write", "rename"}
+    assert calls[0].event_kinds == {"write", "rename", "reconcile"}
     assert calls[0].paths == {"SKILL.md", "scripts/run.sh"}
 
 

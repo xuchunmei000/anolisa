@@ -72,6 +72,7 @@ Skill Ledger 不提供面向用户或 SkillFS 的 `resolve` CLI。activation ref
 ## SkillFS 变更通知接口
 
 SkillFS 发现 source/current workspace 写变化后，通过现有 `agent-sec-daemon` 协议通知 Skill Ledger daemon。本接口已经由 Skill Ledger 侧实现；SkillFS 侧只需要按该协议发送事件。
+启动或重启后，SkillFS 也可以对已加载的普通 skill 发送 `eventKind="reconcile"`、`paths=[]`，请求 Ledger 以当前磁盘状态重新对齐扫描与 activation。
 
 传输形式固定为当前 `agent-sec-daemon` 机制：
 
@@ -105,6 +106,24 @@ skill_ledger.skillfs_notify_change
 }
 ```
 
+启动对齐请求示例：
+
+```json
+{
+  "id": "skillfs-01HY...",
+  "method": "skill_ledger.skillfs_notify_change",
+  "params": {
+    "schemaVersion": 1,
+    "skillDir": "/path/to/source/tianqi-weather",
+    "skillName": "tianqi-weather",
+    "eventKind": "reconcile",
+    "paths": []
+  },
+  "trace_context": {},
+  "timeout_ms": 5000
+}
+```
+
 外层字段说明：
 
 | 字段 | 类型 | 枚举 / 约束 | 说明 |
@@ -122,7 +141,7 @@ skill_ledger.skillfs_notify_change
 | `schemaVersion` | number | `1` | 当前固定为 `1` |
 | `skillDir` | string | 绝对路径；不支持 `~` 展开 | source/current workspace 中的 skill 根目录 |
 | `skillName` | string | 非空字符串 | skill 名称；应与 `skillDir` basename 一致 |
-| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` | SkillFS 观察到的文件系统变化类型 |
+| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` / `reconcile` | SkillFS 观察到的文件系统变化类型；`reconcile` 表示启动后状态对齐，不代表具体文件操作 |
 | `paths` | string[] | 相对 `skillDir` 的路径数组，可为空；不得是绝对路径，不得包含 `..` | 触发变化的相对路径 |
 
 响应示例：
@@ -160,8 +179,9 @@ skill_ledger.skillfs_notify_change
 通知语义：
 
 - 通知表示“某个 skill 的 source workspace 可能已变化”，不是安全结论。
+- `reconcile` 表示“请将 Ledger 侧状态与当前 skill 目录状态对齐”，不是具体文件操作；它应使用 `paths=[]`，且进入同一 notify queue。
 - SkillFS 是受信任事件来源；daemon 对 `skillDir` 做格式、存在性和 `SKILL.md` 检查，不要求该目录预先存在于 `managedSkillDirs`。
-- 对未被当前配置覆盖的新 skill，daemon 执行 scan 时会沿用 Skill Ledger 现有自动记忆逻辑，将该 skill 目录或父目录 glob 写入 `managedSkillDirs`，供后续 reconcile 使用。
+- 对未被当前配置覆盖的新 skill，包括 SkillFS 启动时发来的 `reconcile` skill，daemon 执行 scan 时会沿用 Skill Ledger 现有自动记忆逻辑，将该 skill 目录或父目录 glob 写入 `managedSkillDirs`，供后续 reconcile 使用。
 - 通知成功只表示 daemon 已接收事件，不表示 scan 已完成，也不表示 activation 已刷新。
 - `.skill-meta/**` only 事件会返回 `accepted=true, ignored=true`，不触发扫描，避免 Ledger 写 metadata 时形成循环。SkillFS 也可以选择不发送这类事件。
 - 事件可以重复、乱序或合并；daemon 必须按 skill 维度 debounce，并以当前磁盘状态重新计算。
@@ -170,6 +190,7 @@ Skill Ledger daemon 侧执行的逻辑：
 
 - 接收事件并按 `skillDir` debounce，默认 debounce 窗口为 500ms。
 - 对 source/current workspace 执行 `scan`。如果扫描为 `noop`，仍继续刷新 activation。
+- `reconcile` 不走独立扫描链路；它与安装、修改、rename 等事件一样进入同一 debounced worker，执行同一套 scan + activation refresh。
 - 如果 scan 失败，仍尝试刷新 activation，以便 `drifted`、`tampered` 等状态可以回退到历史 pass snapshot。
 - 调用内部 resolver，写入新的 `.skill-meta/activation.json` 与 xattr。
 - 启动或重启时 reconcile `managedSkillDirs`，补处理 daemon 下线期间错过的变化。
@@ -203,7 +224,7 @@ SkillFS 应维护 append-only JSONL 事件日志，供 daemon reconcile、观测
 | `time` | string | RFC 3339 UTC timestamp | SkillFS 记录事件的时间 |
 | `skillDir` | string | 绝对路径 | source/current workspace 中的 skill 根目录 |
 | `skillName` | string | 非空字符串 | skill 名称；应与 `skillDir` basename 一致 |
-| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` | SkillFS 观察到的文件系统变化类型 |
+| `eventKind` | string | `mkdir` / `create` / `write` / `rename` / `unlink` / `rmdir` / `setattr` / `truncate` / `reconcile` | SkillFS 观察到的文件系统变化类型；`reconcile` 表示启动后状态对齐 |
 | `paths` | string[] | 相对 `skillDir` 的路径数组，可为空；不得是绝对路径，不得包含 `..` | 触发变化的相对路径 |
 
 日志要求：

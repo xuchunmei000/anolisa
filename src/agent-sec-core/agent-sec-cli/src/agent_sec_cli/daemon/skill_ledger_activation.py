@@ -25,7 +25,17 @@ DEFAULT_DEBOUNCE_SECONDS = 0.5
 _SKILL_MANIFEST = "SKILL.md"
 _SKILL_META = ".skill-meta"
 _ALLOWED_EVENT_KINDS = frozenset(
-    {"mkdir", "create", "write", "rename", "unlink", "rmdir", "setattr", "truncate"}
+    {
+        "mkdir",
+        "create",
+        "write",
+        "rename",
+        "unlink",
+        "rmdir",
+        "setattr",
+        "truncate",
+        "reconcile",
+    }
 )
 
 

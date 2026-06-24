@@ -67,15 +67,25 @@ async def wait_for(
     raise AssertionError("timed out waiting for daemon activation update")
 
 
-def notify_payload(skill_dir: Path, paths: list[str] | None = None) -> dict[str, Any]:
+def notify_payload(
+    skill_dir: Path,
+    paths: list[str] | None = None,
+    *,
+    event_kind: str = "write",
+) -> dict[str, Any]:
     """Build daemon params for SkillFS notify."""
     return {
         "schemaVersion": 1,
         "skillDir": str(skill_dir),
         "skillName": skill_dir.name,
-        "eventKind": "write",
-        "paths": paths or ["SKILL.md"],
+        "eventKind": event_kind,
+        "paths": paths if paths is not None else ["SKILL.md"],
     }
+
+
+def reconcile_payload(skill_dir: Path) -> dict[str, Any]:
+    """Build daemon params for SkillFS startup reconcile."""
+    return notify_payload(skill_dir, paths=[], event_kind="reconcile")
 
 
 def write_isolated_config(root: Path, extra: dict[str, Any] | None = None) -> None:
@@ -140,6 +150,167 @@ def test_daemon_notify_scans_and_writes_activation(monkeypatch, tmp_path: Path):
     assert (skill_dir / activation["target"]).is_dir()
     jobs = {job["name"]: job for job in health.data["jobs"]}
     assert jobs["skill-ledger-activation"]["state"] == "running"
+
+
+def test_daemon_reconcile_scans_unmanaged_skill_and_remembers_it(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path)
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
+    socket_path = daemon_socket_path(tmp_path)
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
+            response = await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                reconcile_payload(skill_dir),
+                trace_context={},
+            )
+            activation = await wait_for(
+                lambda: (
+                    read_activation(skill_dir)
+                    if (skill_dir / ".skill-meta" / "activation.json").is_file()
+                    else None
+                )
+            )
+            config = read_skill_ledger_config(tmp_path)
+        finally:
+            await server.stop()
+        return response, activation, config
+
+    response, activation, config = asyncio.run(scenario())
+
+    assert response.ok is True
+    assert response.data["accepted"] is True
+    assert response.data["ignored"] is False
+    assert response.data["skill"]["eventKinds"] == ["reconcile"]
+    assert response.data["skill"]["paths"] == []
+    assert str(skill_dir) in config["managedSkillDirs"]
+    assert activation["schemaVersion"] == 1
+    assert activation["target"] == ".skill-meta/versions/v000001.snapshot"
+
+
+def test_daemon_reconcile_existing_clean_skill_keeps_existing_version(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path)
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo ok\n"})
+    socket_path = daemon_socket_path(tmp_path)
+    scan_calls = {"count": 0}
+
+    from agent_sec_cli.daemon import skill_ledger_activation
+
+    real_scan = skill_ledger_activation._scan_skill
+
+    def spy_scan(skill_path: str, backend: Any) -> dict[str, Any]:
+        scan_calls["count"] += 1
+        return real_scan(skill_path, backend)
+
+    monkeypatch.setattr(
+        "agent_sec_cli.daemon.skill_ledger_activation._scan_skill",
+        spy_scan,
+    )
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                reconcile_payload(skill_dir),
+                trace_context={},
+            )
+            first_latest = await wait_for(
+                lambda: (
+                    read_latest(skill_dir)
+                    if (skill_dir / ".skill-meta" / "latest.json").is_file()
+                    else None
+                )
+            )
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                reconcile_payload(skill_dir),
+                trace_context={},
+            )
+            await wait_for(lambda: scan_calls["count"] >= 2)
+            latest = read_latest(skill_dir)
+            activation = read_activation(skill_dir)
+        finally:
+            await server.stop()
+        return first_latest, latest, activation
+
+    first_latest, latest, activation = asyncio.run(scenario())
+
+    assert first_latest["versionId"] == "v000001"
+    assert latest["versionId"] == "v000001"
+    assert activation["target"] == ".skill-meta/versions/v000001.snapshot"
+
+
+def test_daemon_reconcile_drifted_skill_creates_new_version(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg_config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    write_isolated_config(tmp_path)
+    skill_dir = make_skill(tmp_path / "skills", "weather", {"run.sh": "echo v1\n"})
+    socket_path = daemon_socket_path(tmp_path)
+
+    async def scenario():
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            client = DaemonClient(socket_path=socket_path, timeout_ms=3000)
+            await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                reconcile_payload(skill_dir),
+                trace_context={},
+            )
+            await wait_for(
+                lambda: (
+                    read_latest(skill_dir)
+                    if (skill_dir / ".skill-meta" / "latest.json").is_file()
+                    else None
+                )
+            )
+            (skill_dir / "run.sh").write_text("echo v2\n", encoding="utf-8")
+            response = await asyncio.to_thread(
+                client.call,
+                METHOD_SKILLFS_NOTIFY_CHANGE,
+                reconcile_payload(skill_dir),
+                trace_context={},
+            )
+            latest = await wait_for(
+                lambda: (
+                    read_latest(skill_dir)
+                    if read_latest(skill_dir).get("versionId") == "v000002"
+                    else None
+                )
+            )
+            activation = read_activation(skill_dir)
+        finally:
+            await server.stop()
+        return response, latest, activation
+
+    response, latest, activation = asyncio.run(scenario())
+
+    assert response.ok is True
+    assert latest["versionId"] == "v000002"
+    assert activation["target"] == ".skill-meta/versions/v000002.snapshot"
 
 
 def test_daemon_metadata_only_notify_does_not_change_activation(
