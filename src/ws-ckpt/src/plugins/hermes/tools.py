@@ -274,7 +274,8 @@ WS_CKPT_CHECKPOINT_SCHEMA: Dict[str, Any] = {
 WS_CKPT_ROLLBACK_SCHEMA: Dict[str, Any] = {
     "name": "ws-ckpt-rollback",
     "description": (
-        "Roll back the workspace to a specific checkpoint or N ancestors back. "
+        "Preview or roll back the workspace to a specific checkpoint or N ancestors back. "
+        "Set preview=true to inspect file changes without modifying the workspace. "
         "Use ws-ckpt-list first to see available snapshots."
     ),
     "parameters": {
@@ -301,6 +302,12 @@ WS_CKPT_ROLLBACK_SCHEMA: Dict[str, Any] = {
                     "Optional: workspace absolute path. Defaults to the "
                     "configured workspace. If the path is a symlink, use the "
                     "link itself — do NOT replace it with the resolved real path."
+                ),
+            },
+            "preview": {
+                "type": "boolean",
+                "description": (
+                    "Optional: preview the file changes without modifying the workspace."
                 ),
             },
         },
@@ -656,6 +663,7 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     """Handle ws-ckpt-rollback tool call."""
     target = (args.get("target") or "").strip()
     num_ancestors = args.get("num_ancestors")
+    preview = args.get("preview") is True
 
     if target and num_ancestors is not None:
         return _err("'target' and 'num_ancestors' are mutually exclusive")
@@ -672,9 +680,10 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     workspace, ws_err = _resolve_workspace(args)
     if ws_err:
         return ws_err
-    rejection = _reject_if_cwd_inside_workspace(workspace)
-    if rejection:
-        return rejection
+    if not preview:
+        rejection = _reject_if_cwd_inside_workspace(workspace)
+        if rejection:
+            return rejection
 
     if num_ancestors is not None:
         # Plugin snapshots after each response, so head == current state;
@@ -682,6 +691,8 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
         cmd = ["ws-ckpt", "rollback", "-w", workspace, "-n", str(int(num_ancestors) + 1)]
     else:
         cmd = ["ws-ckpt", "rollback", "-w", workspace, "-s", target]
+    if preview:
+        cmd.append("--preview")
     success, output = _run_ws_ckpt_cmd(cmd)
     return _ok(output) if success else _err(output)
 

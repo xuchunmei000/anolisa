@@ -80,6 +80,14 @@ describe("CommandExecutor", () => {
       const r = await exec.rollback("/ws", "snap1");
       expect(r.exitCode).toBe(0);
     });
+
+    it("passes preview flag", async () => {
+      mockSuccess("preview");
+      const exec = new CommandExecutor();
+      await exec.rollback("/ws", "snap1", undefined, true);
+      const args = promisifiedMock.mock.calls[0][1];
+      expect(args).toContain("--preview");
+    });
   });
 
   describe("delete", () => {

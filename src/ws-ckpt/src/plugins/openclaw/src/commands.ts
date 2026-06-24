@@ -95,11 +95,13 @@ export class CommandExecutor {
    * @param workspace     - Workspace directory path.
    * @param target        - Snapshot identifier (mutually exclusive with numAncestors).
    * @param numAncestors  - Number of ancestors to traverse (mutually exclusive with target).
+   * @param preview       - Show changes without executing the rollback.
    */
   public async rollback(
     workspace: string,
     target?: string,
     numAncestors?: number,
+    preview: boolean = false,
   ): Promise<CommandOutput> {
     if (!target && numAncestors === undefined) {
       throw new Error("Either 'target' or 'numAncestors' is required");
@@ -111,6 +113,9 @@ export class CommandExecutor {
       args.push("--num-ancestors", String(numAncestors + 1));
     } else if (target) {
       args.push("--snapshot", target);
+    }
+    if (preview) {
+      args.push("--preview");
     }
     return this.run(args);
   }

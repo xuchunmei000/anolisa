@@ -343,6 +343,18 @@ describe("handlers — explicit workspace", () => {
     expect(r.text).toContain("Empty workspace");
   });
 
+  it("rollback explicit workspace preview", async () => {
+    promisifiedMock.mockResolvedValue({
+      stdout: "\u001b[1mRollback preview\u001b[0m\nM  file.txt\n",
+      stderr: "",
+    });
+    const r = await handleRollback("snap1", "/explicit", undefined, true);
+    expect(r.isError).toBe(false);
+    expect(r.text).toContain("M  file.txt");
+    const args = promisifiedMock.mock.calls[0][1];
+    expect(args).toContain("--preview");
+  });
+
   it("checkpoint explicit workspace cwd inside", async () => {
     process.cwd = () => "/explicit/sub";
     const r = await handleCheckpoint(
@@ -829,6 +841,6 @@ describe("handleRollback — numAncestors", () => {
     });
     const r = await handleRollback(undefined, undefined, 2);
     expect(r.isError).toBe(false);
-    expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2);
+    expect(mockManager.rollback).toHaveBeenCalledWith(undefined, 2, false);
   });
 });

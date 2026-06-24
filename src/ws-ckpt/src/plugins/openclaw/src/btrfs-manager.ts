@@ -220,22 +220,40 @@ export class BtrfsManager {
    *
    * @param target       - Snapshot identifier (mutually exclusive with numAncestors).
    * @param numAncestors - Number of ancestors to traverse (mutually exclusive with target).
+   * @param preview      - Show changes without executing the rollback.
    * @returns A {@link RollbackResult} describing the outcome.
    */
-  public async rollback(target?: string, numAncestors?: number): Promise<RollbackResult> {
+  public async rollback(
+    target?: string,
+    numAncestors?: number,
+    preview: boolean = false,
+  ): Promise<RollbackResult> {
     if (!this.workspacePath) {
       return { success: false, message: "Workspace not initialized" };
     }
 
     const label = target || `ancestors=${numAncestors}`;
     try {
-      const output = await this.executor.rollback(this.workspacePath, target, numAncestors);
+      const output = await this.executor.rollback(
+        this.workspacePath,
+        target,
+        numAncestors,
+        preview,
+      );
 
       if (output.exitCode !== 0) {
         return {
           success: false,
           target,
           message: mapErrorToLLMMessage(output.stderr, { id: label }),
+        };
+      }
+
+      if (preview) {
+        return {
+          success: true,
+          target,
+          message: output.stdout.replace(/\x1b\[[0-9;]*m/g, "").trim(),
         };
       }
 

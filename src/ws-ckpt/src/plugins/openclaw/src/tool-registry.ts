@@ -118,7 +118,8 @@ export function registerTools(api: OpenClawPluginApi): void {
     {
       name: "ws-ckpt-rollback",
       description:
-        "Roll back the workspace to a previous snapshot or N ancestors back. " +
+        "Preview or roll back the workspace to a previous snapshot or N ancestors back. " +
+        "Set preview=true to inspect file changes without modifying the workspace. " +
         "Always call ws-ckpt-list first to confirm the target snapshot id " +
         "exists; never roll back to an id you haven't verified.",
       parameters: {
@@ -143,6 +144,11 @@ export function registerTools(api: OpenClawPluginApi): void {
               "configured workspace. If the path is a symlink, use the " +
               "link itself — do NOT replace it with the resolved real path.",
           },
+          preview: {
+            type: "boolean",
+            description:
+              "Optional: preview the file changes without modifying the workspace.",
+          },
         },
       },
       async execute(_toolCallId, params) {
@@ -150,6 +156,7 @@ export function registerTools(api: OpenClawPluginApi): void {
           params.target as string | undefined,
           params.workspace as string | undefined,
           params.numAncestors as number | undefined,
+          params.preview as boolean | undefined,
         );
         return textToolResult(r.text, r.isError);
       },

@@ -314,6 +314,16 @@ class TestHandlers:
         assert "-n" in cmd_args
         assert "3" in cmd_args  # 2 + 1 offset
 
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview\nM  file.txt"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace")
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_preview(self, _ws, mock_cwd, mock_cmd):
+        result = json.loads(handle_ws_ckpt_rollback({"target": "snap1", "preview": True}))
+        assert result["success"] is True
+        assert "M  file.txt" in result["output"]
+        assert "--preview" in mock_cmd.call_args[0][0]
+        mock_cwd.assert_not_called()
+
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "snap1 created"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
     @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))

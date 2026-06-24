@@ -92,6 +92,7 @@ export async function handleRollback(
   target?: string,
   workspace?: string,
   numAncestors?: number,
+  preview: boolean = false,
 ): Promise<{ text: string; isError: boolean }> {
   if (!pluginState.manager || !pluginState.environmentReady) {
     return { text: UNAVAILABLE_MSG, isError: true };
@@ -116,16 +117,18 @@ export async function handleRollback(
     return { text: "No workspace configured", isError: true };
   }
 
-  const cwdCheck = cwdInsideWorkspace(resolvedWs);
-  if (cwdCheck.inside) {
-    return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, resolvedWs), isError: true };
+  if (!preview) {
+    const cwdCheck = cwdInsideWorkspace(resolvedWs);
+    if (cwdCheck.inside) {
+      return { text: cwdInsideWorkspaceReason(cwdCheck.cwd, resolvedWs), isError: true };
+    }
   }
 
   if (workspace?.trim()) {
-    return runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors);
+    return runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors, preview);
   }
 
-  const result = await pluginState.manager.rollback(trimmed || undefined, numAncestors);
+  const result = await pluginState.manager.rollback(trimmed || undefined, numAncestors, preview);
   return { text: result.message, isError: !result.success };
 }
 
@@ -133,13 +136,20 @@ async function runRollbackViaExecutor(
   ws: string,
   target?: string,
   numAncestors?: number,
+  preview: boolean = false,
 ): Promise<{ text: string; isError: boolean }> {
   try {
     const executor = new CommandExecutor();
-    const output = await executor.rollback(ws, target, numAncestors);
+    const output = await executor.rollback(ws, target, numAncestors, preview);
     if (output.exitCode !== 0) {
       const label = target || `ancestors=${numAncestors}`;
       return { text: mapErrorToLLMMessage(output.stderr, { id: label }), isError: true };
+    }
+    if (preview) {
+      return {
+        text: output.stdout.replace(/\x1b\[[0-9;]*m/g, "").trim(),
+        isError: false,
+      };
     }
     const timing = extractTiming(output.stdout);
     const desc = target ? `Rolled back to ${target}` : `Rolled back ${numAncestors} ancestor(s)`;

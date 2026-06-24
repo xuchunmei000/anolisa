@@ -280,6 +280,22 @@ describe("BtrfsManager with mocked executor", () => {
     expect(r.target).toBe("snap1");
   });
 
+  it("rollback preview returns diff without refreshing cache", async () => {
+    const mgr = new BtrfsManager(cfg);
+    const exec = (mgr as any).executor;
+    exec.init = vi.fn().mockResolvedValue(ok());
+    exec.list = vi.fn().mockResolvedValue(ok("[]"));
+    await mgr.initialize("/ws");
+    exec.list.mockClear();
+
+    exec.rollback = vi.fn().mockResolvedValue(ok("\u001b[1mRollback preview\u001b[0m\nM  file.txt"));
+    const r = await mgr.rollback("snap1", undefined, true);
+    expect(r.success).toBe(true);
+    expect(r.message).toContain("M  file.txt");
+    expect(exec.rollback).toHaveBeenCalledWith("/ws", "snap1", undefined, true);
+    expect(exec.list).not.toHaveBeenCalled();
+  });
+
   it("rollback failure", async () => {
     const mgr = new BtrfsManager(cfg);
     const exec = (mgr as any).executor;
