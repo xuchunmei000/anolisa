@@ -22,12 +22,14 @@ from agent_sec_cli.skill_ledger.activation_policy import (
     DEFAULT_ACTIVATION_POLICY,
     validate_activation_policy,
 )
+from agent_sec_cli.skill_ledger.core.checker import check
 from agent_sec_cli.skill_ledger.core.exposure import (
     build_exposure_summary,
     exposure_target,
     is_pending_decision_target,
     pending_decision_target,
 )
+from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
 from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
     ensure_skill_meta,
@@ -111,9 +113,15 @@ def resolve_activation(
     """
     policy = validate_activation_policy(policy)
 
+    skill_dir = str(require_live_skill_dir(skill_dir, backend))
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
-    summary = build_exposure_summary(skill_dir, backend)
+    status_result = check(skill_dir, backend)
+    summary = build_exposure_summary(
+        skill_dir,
+        backend,
+        status_result=status_result,
+    )
     target = summary["target"]
     active_version = summary["activeVersionId"]
 
@@ -168,7 +176,13 @@ def find_latest_activation_snapshot(
 ) -> tuple[str, str] | None:
     """Return ``(version_id, target)`` for the current exposure summary."""
     validate_activation_policy(policy)
-    summary = build_exposure_summary(str(skill_dir), backend)
+    live_skill_dir = require_live_skill_dir(skill_dir, backend)
+    status_result = check(str(live_skill_dir), backend)
+    summary = build_exposure_summary(
+        str(live_skill_dir),
+        backend,
+        status_result=status_result,
+    )
     version_id = summary["activeVersionId"]
     target = summary["target"]
     if version_id is None or target is None:

@@ -18,6 +18,10 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
+from agent_sec_cli.skill_ledger.core.manifest_helpers import (
+    snapshot_matches_manifest,
+)
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     MISSING_SIGNATURE_ERROR,
     manifest_hash_error,
@@ -26,6 +30,7 @@ from agent_sec_cli.skill_ledger.core.manifest_integrity import (
 from agent_sec_cli.skill_ledger.core.version_chain import (
     latest_json_path,
     load_latest_manifest,
+    snapshot_dir_path,
 )
 from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
@@ -64,7 +69,8 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
     ``skillName``, ``versionId``, ``createdAt``, ``updatedAt``, ``fileCount``,
     ``manifestHash``.
     """
-    # Step 0: Validate skill directory
+    # Step 0: Validate skill directory and avoid SkillFS runtime views.
+    skill_dir = str(require_live_skill_dir(skill_dir, backend))
     validate_skill_dir(skill_dir)
     skill_name = Path(skill_dir).name
 
@@ -157,6 +163,72 @@ def check(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
         return {**meta, "status": "none"}
 
     # pass (or any other value)
+    return {**meta, "status": "pass"}
+
+
+def manifest_only_status(skill_dir: str, backend: SigningBackend) -> dict[str, Any]:
+    """Return latest trusted manifest status without hashing root files."""
+    validate_skill_dir(skill_dir)
+    skill_name = Path(skill_dir).name
+    try:
+        manifest = load_latest_manifest(skill_dir)
+    except (json.JSONDecodeError, ValueError) as exc:
+        if latest_json_path(skill_dir).is_file():
+            return {
+                "status": "tampered",
+                "skillName": skill_name,
+                "versionId": None,
+                "createdAt": None,
+                "updatedAt": None,
+                "fileCount": None,
+                "manifestHash": None,
+                "reason": f"manifest file is corrupted: {exc}",
+            }
+        manifest = None
+    if manifest is None:
+        return {
+            "status": "none",
+            "skillName": skill_name,
+            "versionId": None,
+            "createdAt": None,
+            "updatedAt": None,
+            "fileCount": None,
+            "manifestHash": None,
+        }
+
+    meta = _manifest_metadata(manifest, skill_dir)
+    hash_error = manifest_hash_error(manifest)
+    if hash_error is not None:
+        return {**meta, "status": "tampered", "reason": hash_error}
+
+    signature_valid, signature_error = verify_manifest_signature(manifest, backend)
+    if not signature_valid and signature_error == MISSING_SIGNATURE_ERROR:
+        return {
+            **meta,
+            "status": "none",
+            "reason": "manifest has no signature (legacy)",
+        }
+    if not signature_valid:
+        return {**meta, "status": "tampered", "reason": signature_error}
+
+    if not snapshot_matches_manifest(
+        snapshot_dir_path(skill_dir, manifest.versionId),
+        manifest,
+    ):
+        return {
+            **meta,
+            "status": "tampered",
+            "reason": "snapshot does not match manifest",
+        }
+
+    if manifest.scanStatus in {"deny", "warn"}:
+        return {
+            **meta,
+            "status": manifest.scanStatus,
+            "findings": _collect_findings(manifest),
+        }
+    if manifest.scanStatus == "none":
+        return {**meta, "status": "none"}
     return {**meta, "status": "pass"}
 
 

@@ -16,6 +16,7 @@ from agent_sec_cli.skill_ledger.core.file_hasher import (
     compute_file_hashes,
     diff_file_hashes,
 )
+from agent_sec_cli.skill_ledger.core.live_root import require_live_skill_dir
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     manifest_hash_error,
     verify_manifest_integrity,
@@ -465,6 +466,7 @@ def scan_skill(
     force: bool = False,
 ) -> dict[str, Any]:
     """Run built-in scanners as needed and record signed scan results."""
+    skill_dir = str(require_live_skill_dir(skill_dir, backend))
     validate_skill_dir(skill_dir)
     _remember_skill_dir_best_effort(skill_dir)
 
@@ -579,6 +581,7 @@ def certify(
             "--findings is required for certify; use 'skill-ledger scan' for built-in scanners",
         )
 
+    skill_dir = str(require_live_skill_dir(skill_dir, backend))
     validate_skill_dir(skill_dir)
     _remember_skill_dir_best_effort(skill_dir)
 

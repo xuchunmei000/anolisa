@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from agent_sec_cli.skill_ledger.activation_policy import (
     allowed_scan_statuses_for_policy,
 )
-from agent_sec_cli.skill_ledger.core.checker import check
+from agent_sec_cli.skill_ledger.core.checker import manifest_only_status
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
     safe_load_latest_manifest,
     snapshot_matches_manifest,
@@ -53,7 +54,7 @@ def build_exposure_summary(
     """
     validate_skill_dir(skill_dir)
     if status_result is None:
-        status_result = check(skill_dir, backend)
+        status_result = manifest_only_status(skill_dir, backend)
     latest_status = str(status_result.get("status", "unknown"))
     latest_manifest = safe_load_latest_manifest(skill_dir)
     latest_version = _latest_version_id(status_result, latest_manifest)
