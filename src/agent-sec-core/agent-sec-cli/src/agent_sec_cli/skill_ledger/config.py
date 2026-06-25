@@ -317,6 +317,15 @@ def is_covered(skill_dir: Path, config: dict[str, Any] | None = None) -> bool:
     return any(d.resolve() == resolved_target for d in all_dirs)
 
 
+def is_managed_covered(skill_dir: Path, config: dict[str, Any] | None = None) -> bool:
+    """Return ``True`` if *skill_dir* is explicitly covered by managedSkillDirs."""
+    if config is None:
+        config = load_config()
+    resolved_target = skill_dir.resolve()
+    managed_dirs = resolve_managed_skill_dirs(config)
+    return any(d.resolve() == resolved_target for d in managed_dirs)
+
+
 def remember_skill_dir(
     skill_dir: Path, config: dict[str, Any] | None = None
 ) -> str | None:
@@ -335,7 +344,7 @@ def remember_skill_dir(
     if config is None:
         config = load_config()
 
-    if is_covered(skill_dir, config):
+    if is_managed_covered(skill_dir, config):
         return None
 
     parent = skill_dir.parent

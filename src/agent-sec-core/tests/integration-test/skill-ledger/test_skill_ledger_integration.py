@@ -1300,6 +1300,39 @@ def test_certify_delete_findings_on_success(ws):
     assert not findings.exists()
 
 
+def test_certify_default_dir_skill_is_remembered_for_managed_show(ws, monkeypatch):
+    """Certifying a default-dir skill must promote it into managedSkillDirs."""
+    default_root = ws.root / "certify-default-root"
+    skill = make_skill(default_root, "certify-default-managed", {"g.txt": "g"})
+    env = ws.env()
+    write_skill_ledger_config(
+        ws.root,
+        {"enableDefaultSkillDirs": True, "managedSkillDirs": []},
+    )
+    monkeypatch.setattr(config_module, "DEFAULT_SKILL_DIRS", [str(default_root / "*")])
+    findings = write_findings_file(
+        ws.fixtures,
+        "certify-default-managed.json",
+        [{"rule": "ok", "level": "pass", "message": "ok"}],
+    )
+
+    certified = run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)],
+        env_extra=env,
+    )
+    assert certified.returncode == 0, f"certify failed: {certified.stderr}"
+    cfg_path = ws.xdg_config / "agent-sec" / "skill-ledger" / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    assert cfg["managedSkillDirs"] == [str(skill)]
+
+    shown = run_skill_ledger(["show", str(skill)], env_extra=env)
+    assert shown.returncode == 0, f"show failed: {shown.stderr}"
+    out = parse_json_output(shown.stdout)
+    assert out["latestStatus"] == "pass"
+    assert out["latestVersionId"] == "v000001"
+    assert out["reasonCode"] == "normal"
+
+
 def test_certify_no_skill_dir_no_all(ws):
     """certify without skill_dir and without --all → exit 1."""
     env = ws.env()

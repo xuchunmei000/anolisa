@@ -471,6 +471,20 @@ class TestRememberSkillDir(unittest.TestCase):
         entry = self._patched_remember(s, config)
         self.assertIsNone(entry)
 
+    def test_default_dir_coverage_still_remembers_as_managed(self):
+        s = self._make_skill("default-covered")
+        config = {"enableDefaultSkillDirs": True, "managedSkillDirs": []}
+
+        with patch.object(
+            config_module,
+            "DEFAULT_SKILL_DIRS",
+            [str(self.skills_root) + "/*"],
+        ):
+            entry = self._patched_remember(s, config)
+
+        self.assertEqual(entry, str(s))
+        self.assertEqual(config["managedSkillDirs"], [str(s)])
+
     def test_compact_prunes_after_glob_promotion(self):
         s1 = self._make_skill("first")
         config = {"enableDefaultSkillDirs": False, "managedSkillDirs": [str(s1)]}
