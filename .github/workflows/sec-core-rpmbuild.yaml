@@ -101,6 +101,7 @@ jobs:
           ls /opt/agent-sec/codex-plugin/hooks/code_scanner_hook.py
           ls /opt/agent-sec/codex-plugin/hooks/skill_ledger_hook.py
           ls /opt/agent-sec/codex-plugin/install.sh
+          ls /opt/agent-sec/codex-plugin/.agents/plugins/marketplace.json
           echo "=== Verify skills ==="
           ls /usr/share/anolisa/skills/
           echo "=== Verify component manifest ==="

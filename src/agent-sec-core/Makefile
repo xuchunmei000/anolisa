@@ -200,6 +200,7 @@ stage-codex-plugin: ## Stage codex-plugin hooks and install script to BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/codex-plugin
 	cp -rp codex-plugin/hooks-plugin/. $(BUILD_DIR)/codex-plugin/
 	cp -p codex-plugin/install.sh $(BUILD_DIR)/codex-plugin/
+	cp -rp codex-plugin/.agents $(BUILD_DIR)/codex-plugin/
 
 .PHONY: stage-cosh-extension
 stage-cosh-extension: ## Stage cosh-extension hooks to BUILD_DIR

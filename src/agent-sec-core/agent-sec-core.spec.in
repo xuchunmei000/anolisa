@@ -195,6 +195,7 @@ and skill ledger verification for Codex agent.
 
 %files -n agent-sec-codex-hook
 %defattr(0644,root,root,0755)
+%attr(0755,root,root) /opt/agent-sec/codex-plugin/install.sh
 /opt/agent-sec/codex-plugin/
 %license LICENSE
 

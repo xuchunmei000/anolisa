@@ -249,10 +249,11 @@ build_agent_sec_core() {
         --exclude='__pycache__' \
         hermes-plugin/src hermes-plugin/scripts | tar -xf - -C "$pkg_dir/"
 
-    # codex-plugin (hooks + install script, exclude __pycache__)
+    # codex-plugin (hooks + install script + .agents registry, exclude __pycache__)
     tar -cf - -C "${SEC_DIR}" \
         --exclude='__pycache__' \
-        codex-plugin/hooks-plugin codex-plugin/install.sh | tar -xf - -C "$pkg_dir/"
+        codex-plugin/hooks-plugin codex-plugin/install.sh codex-plugin/.agents | tar -xf - -C "$pkg_dir/"
+
 
     # Include agent-sec-cli source for maturin wheel build
     # Exclude development artifacts (.venv, target, __pycache__, .egg-info, dist)
