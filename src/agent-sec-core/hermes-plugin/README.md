@@ -131,6 +131,7 @@ Hermes 支持的 hook 及其回调签名：
 - `policy = "warn"`：warning-only 兼容模式；summary `message` 非空时缓存为本轮告警，并通过
   `transform_llm_output` 追加到最终回复开头，确保用户可见。
 - `policy = "block"`：summary `message` 非空时直接返回 Hermes block 结果。
+- `latestStatus = "unmanaged"` 是 Skill Ledger 诊断状态，summary `message` 为 `null`，包括 `block` 在内的所有 policy 都静默放行。
 - 未配置 `policy` 的旧配置仍兼容：`enable_block = true` 映射为 `block`，`enable_block = false` 映射为 `warn`。
 - 当前版本仅覆盖 Hermes 默认本地技能目录 `~/.hermes/skills`，按 Hermes `skill_view`
   的本地目录规则解析 `category/skill` 或裸 skill 名称；`skills.external_dirs` 和

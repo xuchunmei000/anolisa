@@ -330,6 +330,7 @@ Default behavior:
 - `policy: "warn"` logs warning-level diagnostics for non-empty `show.message` but allows the read.
 - `policy: "debug"` logs debug diagnostics for non-empty `show.message` and allows the read.
 - `policy: "block"` blocks the read when `show.message` is non-empty and uses that message as the block reason.
+- `latestStatus: "unmanaged"` is a Skill Ledger diagnostic state with `show.message: null`; every policy, including `block`, allows it silently.
 - Legacy configs without `policy` still map `enableBlock: true` to `block` and `enableBlock: false` to `warn`.
   `blockStatuses` is accepted as deprecated configuration metadata but no longer controls runtime decisions.
 

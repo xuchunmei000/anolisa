@@ -287,7 +287,12 @@ def export_skill(
     output: str,
     policy: str | None = None,
 ) -> dict[str, Any]:
-    """Export a signed snapshot plus manifest and findings for user review."""
+    """Export a signed snapshot plus manifest and findings for user review.
+
+    This is a read-only ledger snapshot review path.  It intentionally does not
+    require a manageable live root for ``latest`` or explicit version exports,
+    so users can inspect hidden risky snapshots from SkillFS runtime views.
+    """
     validate_skill_dir(skill_dir)
     version_id = _resolve_export_version(skill_dir, backend, version, policy=policy)
     manifest = _load_trusted_version(skill_dir, version_id, backend)
