@@ -97,9 +97,10 @@ jobs:
           ls /usr/bin/agent-sec-daemon
           echo "=== Verify codex plugin ==="
           ls /opt/agent-sec/codex-plugin/
-          ls /opt/agent-sec/codex-plugin/hooks/
-          ls /opt/agent-sec/codex-plugin/hooks/code_scanner_hook.py
-          ls /opt/agent-sec/codex-plugin/hooks/skill_ledger_hook.py
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/code_scanner_hook.py
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/hooks/skill_ledger_hook.py
+          ls /opt/agent-sec/codex-plugin/hooks-plugin/.codex-plugin/plugin.json
           ls /opt/agent-sec/codex-plugin/install.sh
           ls /opt/agent-sec/codex-plugin/.agents/plugins/marketplace.json
           echo "=== Verify skills ==="
