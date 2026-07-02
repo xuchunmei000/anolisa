@@ -686,9 +686,7 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
             return rejection
 
     if num_ancestors is not None:
-        # Plugin snapshots after each response, so head == current state;
-        # +1 so user's "go back 1 step" skips the head snapshot.
-        cmd = ["ws-ckpt", "rollback", "-w", workspace, "-n", str(int(num_ancestors) + 1)]
+        cmd = ["ws-ckpt", "rollback", "-w", workspace, "-n", str(num_ancestors)]
     else:
         cmd = ["ws-ckpt", "rollback", "-w", workspace, "-s", target]
     if preview:

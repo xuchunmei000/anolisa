@@ -234,14 +234,14 @@ describe("CommandExecutor", () => {
   });
 
   describe("rollback — numAncestors", () => {
-    it("passes numAncestors+1 to CLI", async () => {
+    it("passes numAncestors as-is when autoCheckpoint is not enabled", async () => {
       mockSuccess("rolled back");
       const exec = new CommandExecutor();
       const r = await exec.rollback("/ws", undefined, 2);
       expect(r.exitCode).toBe(0);
       const args = promisifiedMock.mock.calls[0][1];
       expect(args).toContain("--num-ancestors");
-      expect(args).toContain("3");
+      expect(args).toContain("2");
     });
 
     it("throws when neither target nor numAncestors", async () => {

@@ -108,9 +108,7 @@ export class CommandExecutor {
     }
     const args = ["rollback", "--workspace", workspace];
     if (numAncestors !== undefined) {
-      // Plugin snapshots after each response, so head == current state;
-      // +1 so user's "go back 1 step" skips the head snapshot.
-      args.push("--num-ancestors", String(numAncestors + 1));
+      args.push("--num-ancestors", String(numAncestors));
     } else if (target) {
       args.push("--snapshot", target);
     }

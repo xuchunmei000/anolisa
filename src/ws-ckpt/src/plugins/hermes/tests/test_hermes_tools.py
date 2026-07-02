@@ -312,7 +312,7 @@ class TestHandlers:
         assert result["success"] is True
         cmd_args = mock_cmd.call_args[0][0]
         assert "-n" in cmd_args
-        assert "3" in cmd_args  # 2 + 1 offset
+        assert "2" in cmd_args
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview\nM  file.txt"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")
