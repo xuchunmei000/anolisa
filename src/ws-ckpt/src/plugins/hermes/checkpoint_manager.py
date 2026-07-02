@@ -99,6 +99,7 @@ class CheckpointManager:
     def __init__(self, config: HermesPluginConfig) -> None:
         self._config = config
         self._turn_count: int = 0
+        self.skip_next_auto_checkpoint: bool = False
 
     @property
     def config(self) -> HermesPluginConfig:

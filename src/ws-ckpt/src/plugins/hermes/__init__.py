@@ -125,6 +125,10 @@ def _on_session_end(
     """Handle on_session_end — create a checkpoint after the turn."""
     manager = get_manager()
 
+    if manager.skip_next_auto_checkpoint:
+        manager.skip_next_auto_checkpoint = False
+        return
+
     if not manager.config.auto_checkpoint:
         return
 

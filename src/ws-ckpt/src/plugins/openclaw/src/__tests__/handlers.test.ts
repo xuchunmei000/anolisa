@@ -150,6 +150,7 @@ describe("handlers — validation", () => {
     pluginState.manager = origManager;
     pluginState.environmentReady = origReady;
     pluginState.resolvedConfig = origConfig;
+    pluginState.skipNextAutoCheckpoint = false;
   });
 
   it("handleCheckpoint requires id", async () => {
@@ -196,6 +197,38 @@ describe("handlers — validation", () => {
     const r = await handleRollback("snap1");
     expect(r.isError).toBe(false);
     expect(r.text).toContain("snap1");
+  });
+
+  it("handleRollback sets skipNextAutoCheckpoint on success", async () => {
+    mockManager.rollback.mockResolvedValue({
+      success: true,
+      target: "snap1",
+      message: "Rolled back to snap1",
+    });
+    pluginState.skipNextAutoCheckpoint = false;
+    await handleRollback("snap1");
+    expect(pluginState.skipNextAutoCheckpoint).toBe(true);
+  });
+
+  it("handleRollback does not set skipNextAutoCheckpoint on preview", async () => {
+    mockManager.rollback.mockResolvedValue({
+      success: true,
+      target: "snap1",
+      message: "Preview",
+    });
+    pluginState.skipNextAutoCheckpoint = false;
+    await handleRollback("snap1", undefined, undefined, true);
+    expect(pluginState.skipNextAutoCheckpoint).toBe(false);
+  });
+
+  it("handleRollback does not set skipNextAutoCheckpoint on failure", async () => {
+    mockManager.rollback.mockResolvedValue({
+      success: false,
+      message: "failed",
+    });
+    pluginState.skipNextAutoCheckpoint = false;
+    await handleRollback("snap1");
+    expect(pluginState.skipNextAutoCheckpoint).toBe(false);
   });
 
   it("handleListCheckpoints empty", async () => {

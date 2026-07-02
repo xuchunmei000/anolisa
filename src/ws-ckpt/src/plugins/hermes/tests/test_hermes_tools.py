@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hermes.checkpoint_manager import get_manager
 from hermes.tools import (
     _parse_workspace_policy_json,
     _render_workspace_policy,
@@ -313,6 +314,33 @@ class TestHandlers:
         cmd_args = mock_cmd.call_args[0][0]
         assert "-n" in cmd_args
         assert "2" in cmd_args
+
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "rolled back"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_sets_skip_flag(self, _ws, _cwd, _cmd):
+        mgr = get_manager()
+        mgr.skip_next_auto_checkpoint = False
+        handle_ws_ckpt_rollback({"target": "snap1"})
+        assert mgr.skip_next_auto_checkpoint is True
+
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "preview"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace")
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_preview_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
+        mgr = get_manager()
+        mgr.skip_next_auto_checkpoint = False
+        handle_ws_ckpt_rollback({"target": "snap1", "preview": True})
+        assert mgr.skip_next_auto_checkpoint is False
+
+    @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(False, "failed"))
+    @patch("hermes.tools._reject_if_cwd_inside_workspace", return_value=None)
+    @patch("hermes.tools._resolve_workspace", return_value=("/ws", None))
+    def test_rollback_failure_does_not_set_skip_flag(self, _ws, _cwd, _cmd):
+        mgr = get_manager()
+        mgr.skip_next_auto_checkpoint = False
+        handle_ws_ckpt_rollback({"target": "snap1"})
+        assert mgr.skip_next_auto_checkpoint is False
 
     @patch("hermes.tools._run_ws_ckpt_cmd", return_value=(True, "Rollback preview\nM  file.txt"))
     @patch("hermes.tools._reject_if_cwd_inside_workspace")

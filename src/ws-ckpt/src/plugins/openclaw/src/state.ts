@@ -27,6 +27,9 @@ export const pluginState = {
 
   /** Resolved plugin config for inspection via ws-ckpt-config tool. */
   resolvedConfig: null as PluginConfig | null,
+
+  /** One-shot flag: skip the next turn-end auto-checkpoint (set after rollback). */
+  skipNextAutoCheckpoint: false,
 };
 
 // ---------------------------------------------------------------------------

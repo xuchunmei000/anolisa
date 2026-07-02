@@ -125,10 +125,17 @@ export async function handleRollback(
   }
 
   if (workspace?.trim()) {
-    return runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors, preview);
+    const execResult = await runRollbackViaExecutor(resolvedWs, trimmed || undefined, numAncestors, preview);
+    if (!execResult.isError && !preview) {
+      pluginState.skipNextAutoCheckpoint = true;
+    }
+    return execResult;
   }
 
   const result = await pluginState.manager.rollback(trimmed || undefined, numAncestors, preview);
+  if (result.success && !preview) {
+    pluginState.skipNextAutoCheckpoint = true;
+  }
   return { text: result.message, isError: !result.success };
 }
 

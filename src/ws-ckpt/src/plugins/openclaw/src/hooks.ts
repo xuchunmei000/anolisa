@@ -52,6 +52,10 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
 
   // Hook: agent_end — create end-of-turn checkpoint
   api.on("agent_end", async (_event: unknown) => {
+    if (pluginState.skipNextAutoCheckpoint) {
+      pluginState.skipNextAutoCheckpoint = false;
+      return;
+    }
     if (!config.autoCheckpoint) return;
     if (!pluginState.manager || !pluginState.environmentReady) return;
 
@@ -100,10 +104,7 @@ export function registerHooks(api: OpenClawPluginApi, config: PluginConfig): voi
           console.warn("[ws-ckpt] Cron sync error:", err instanceof Error ? err.message : String(err));
         }
       }
-    }
-
     if (!config.autoCheckpoint) return;
-    const workspace = pluginState.resolvedConfig?.workspace;
     if (!pluginState.manager || !pluginState.environmentReady || !workspace) return;
 
     const cwdCheckStart = cwdInsideWorkspace(workspace);

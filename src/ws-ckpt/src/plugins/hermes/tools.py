@@ -692,6 +692,8 @@ def handle_ws_ckpt_rollback(args: Dict[str, Any], **_kwargs) -> str:
     if preview:
         cmd.append("--preview")
     success, output = _run_ws_ckpt_cmd(cmd)
+    if success and not preview:
+        get_manager().skip_next_auto_checkpoint = True
     return _ok(output) if success else _err(output)
 
 
