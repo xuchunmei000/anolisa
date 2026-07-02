@@ -434,6 +434,10 @@ export async function handleConfig(
       const schedules = pluginState.resolvedConfig.cronSchedules ?? [];
       const warnings = await CrontabManager.migrate(oldWs, value, schedules);
       const persistErr = persistConfig({ workspace: value });
+      // Re-initialize manager with new workspace so subsequent commands use it
+      if (pluginState.manager) {
+        await pluginState.manager.ensureWorkspace(value);
+      }
       let msg = `Config updated: workspace = ${value}`;
       if (persistErr) msg += `\n\nWARNING: Failed to persist config: ${persistErr}. Change is in-memory only.`;
       if (warnings.length > 0) msg += "\n\n" + warnings.join("\n");
